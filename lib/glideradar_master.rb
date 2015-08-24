@@ -1,4 +1,3 @@
-#!/usr/bin/env ruby
 #
 # Copyright (C) 2015-2015, Daniele Orlandi
 #
@@ -11,453 +10,18 @@ require 'ygg/agent/base'
 
 require 'ygg/app/line_buffer'
 
-require 'glideradar_master/version'
-require 'glideradar_master/task'
-
 require 'securerandom'
 require 'time'
 
 require 'pg'
 
+require 'glideradar_master/version'
+require 'glideradar_master/task'
+require 'glideradar_master/station'
+require 'glideradar_master/traffic'
+require 'glideradar_master/recorder'
+
 module GlideradarMaster
-
-class Station
-  attr_accessor :flarm_code
-  attr_accessor :name
-  attr_accessor :last_update
-
-  attr_reader :reception_state
-
-  attr_accessor :lat
-  attr_accessor :lng
-  attr_accessor :alt
-  attr_accessor :cog
-  attr_accessor :sog
-  attr_accessor :gps_fix_qual
-  attr_accessor :gps_sats
-  attr_accessor :gps_fix_type
-  attr_accessor :gps_pdop
-  attr_accessor :gps_hdop
-  attr_accessor :gps_vdop
-
-  protected
-  attr_reader :log
-
-  public
-
-  def initialize(name:, data:, log:, event_cb:)
-    @name = name
-    @log = log
-    @event_cb = event_cb
-
-    @reception_state = :unknown
-
-    update(data)
-  end
-
-  def update(data)
-    since = @last_update
-
-    @last_update = Time.parse(data[:time])
-
-    @lat = data[:lat]
-    @lng = data[:lng]
-    @alt = data[:alt]
-    @cog = data[:cog]
-    @sog = data[:sog]
-    @gps_fix_qual = data[:gps_fix_qual]
-    @gps_sats = data[:gps_sats]
-    @gps_fix_type = data[:gps_fix_type]
-    @gps_pdop = data[:gps_pdop]
-    @gps_hdop = data[:gps_hdop]
-    @gps_vdop = data[:gps_vdop]
-
-    case @reception_state
-    when :unknown, :lost
-      change_reception_state(:alive)
-      alive!(since: since)
-    when :alive
-    end
-  end
-
-  def processed_representation
-   {
-    flarm_code: @flarm_code,
-    name: @name,
-
-    lat: @lat,
-    lng: @lng,
-    alt: @alt,
-    cog: @cog,
-    sog: @sog,
-    gps_fix_qual: @gps_fix_qual,
-    gps_sats: @gps_sats,
-    gps_fix_type: @gps_fix_type,
-    gps_pdop: @gps_pdop,
-    gps_hdop: @gps_hdop,
-    gps_vdop: @gps_vdop,
-
-    last_update: @last_update,
-   }
-  end
-
-  def check_alive(now)
-    case @reception_state
-    when :unknown, :lost
-    when :alive
-      if now - last_update > 10.seconds
-        change_reception_state(:lost)
-        lost!
-      end
-    end
-  end
-
-  protected
-
-  def alive!(since:)
-    event(:STATION_ONLINE, "Now online", since: since)
-  end
-
-  def lost!
-    event(:STATION_OFFLINE, "Went offline")
-  end
-
-  def change_reception_state(new_reception_state)
-    log.debug "changed reception state from #{@reception_state} to #{new_reception_state}"
-    @reception_state = new_reception_state
-  end
-
-  def event(event_name, text, data = {})
-    @event_cb.call(self, event_name, text, data)
-  end
-
-  public
-
-  def to_s
-    name
-  end
-end
-
-class Obj
-  class DataError < StandardError
-  end
-
-  attr_accessor :type
-  attr_accessor :plane_id
-  attr_accessor :registration
-  attr_accessor :flarm_code
-  attr_accessor :icao_code
-  attr_accessor :last_update
-
-  attr_accessor :srcs
-
-  attr_accessor :lat
-  attr_accessor :lng
-  attr_accessor :alt
-  attr_accessor :cog
-  attr_accessor :sog
-  attr_accessor :tr
-  attr_accessor :cr
-
-  attr_reader :reception_state
-  attr_reader :flying_state
-  attr_reader :towing_state
-
-  protected
-  attr_reader :log
-  public
-
-  def initialize(obj_id:, data:, source:, log:, event_cb:)
-    @srcs = {}
-
-    @type = data[:type]
-
-    if obj_id =~ /^flarm:(.*)/
-      @flarm_code = $1
-    elsif obj_id =~ /^icao:(.*)/
-      obj.icao_code = $1
-    end
-
-    @reception_state = :unknown
-    @flying_state = :unknown
-    @towing_state = :unknown
-
-    @log = log
-    @event_cb = event_cb
-
-    update(data: data, source: source)
-  end
-
-  def update(data:, source:)
-    if !data[:ts]
-      log.warn "Spurious data received: no ts in update"
-      raise DataError
-    end
-
-    since = @last_update
-
-    @last_update = Time.parse(data[:ts])
-    data[:last_update] = data[:ts]
-
-    @srcs[source] = data
-
-    case @reception_state
-    when :unknown, :lost
-      change_reception_state(:alive)
-      alive!(since: since)
-    when :alive
-    end
-  end
-
-  def updates_complete
-    return if @srcs.count == 0
-
-    src = @srcs.first[1]
-
-    @lat = src[:lat]
-    @lng = src[:lng]
-    @alt = src[:alt]
-    @cog = src[:cog]
-    @sog = src[:sog]
-    @tr = src[:tr]
-    @cr = src[:cr]
-
-    case @flying_state
-    when :unknown
-      if on_land?
-        change_flying_state(:on_land)
-        on_land!
-      else
-        change_flying_state(:flying)
-        flying!
-      end
-
-    when :flying
-      if on_land?
-        @maybe_on_land_since = @last_update
-        change_flying_state(:maybe_on_land)
-      end
-
-    when :maybe_on_land
-      if on_land? && @last_update - @maybe_on_land_since > 5
-        change_flying_state(:on_land)
-        landed!
-      end
-
-    when :on_land
-      if @sog > 15
-        @maybe_flying_since = @last_update
-        @maybe_flying_alt = @alt
-        change_flying_state(:maybe_flying)
-      end
-
-    when :maybe_flying
-      if @sog > 15
-        if @alt - @maybe_flying_alt > 30
-          change_flying_state(:flying)
-        end
-      else
-        change_flying_state(:on_land)
-        takeoff!
-      end
-    end
-  end
-
-  def check_alive(now)
-    case @reception_state
-    when :unknown, :lost
-    when :alive
-      if now - last_update > 10.seconds
-        change_reception_state(:lost)
-        lost!
-      end
-    end
-  end
-
-  def check_towed(other_obj)
-    # Give height difference 3x the weight
-
-    return if !alt || !lat || !lng || !other_obj.alt || !other_obj.lat || !other_obj.lng
-
-    pseudist = Math.sqrt(((other_obj.alt - alt) * 3)**2 +
-                        ((other_obj.lat - lat) * 1854 * 60)**2 +
-                        ((other_obj.lng - lng) * 1854 * 60 * Math.cos(lat / 180 * Math::PI))**2 )
-
-    case @towing_state
-    when :unknown, :tow_released
-      if @flying_state == :flying && other_obj.flying_state == :flying && pseudist < 250
-
-        if @towing_state == :unknown
-          change_towing_state(:maybe)
-        else
-          change_towing_state(:maybe_after_towing)
-        end
-
-        @towing_glider = other_obj
-        @towing_cum_distance = pseudist
-        @towing_samples = 1
-        @towing_since = @last_update
-      end
-    when :maybe, :maybe_after_towing
-      if other_obj == @towing_glider
-        @towing_cum_distance += pseudist
-        @towing_samples += 1
-
-        if @towing_samples > 10
-  log.warn "TOWCUM #{@towing_cum_distance}"
-          if @towing_cum_distance < 2000
-            if @towing_state == :maybe_after_towing
-              log.err "Tow detected in tow_released. Missed landing?"
-              event(:TOW_ANOMALY, 'Tow detected in tow_released. Missed landing?')
-            end
-
-            change_towing_state(:towing)
-            event(:TOW_STARTED, 'Tow started', towing: @towing_glider)
-          else
-            change_towing_state(:unknown)
-            @towing_glider = nil
-          end
-        end
-      end
-
-    when :towing
-      if other_obj == @towing_glider && pseudist > 750
-        change_towing_state(:tow_released)
-        @tow_ended_cb.call(:TOW_RELEASED, 'Tow released', towing: @towing_glider, duration: @last_update - @towing_since)
-      end
-    end
-  end
-
-
-  protected
-
-  def takeoff!
-    event(:TAKEOFF, 'Takeoff')
-    flying!
-  end
-
-  def landed!
-    event(:LAND, 'Landed')
-    on_land!
-  end
-
-  def on_land!
-    case @towing_state
-    when :towing
-      log.err "Towplane landed while towing?!"
-      event(:TOW_ANOMALY, 'Landed while towing?!')
-      change_towing_state(:unknown)
-    when :maybe
-      change_towing_state(:unknown)
-    when :tow_released
-      change_towing_state(:unknown)
-    end
-  end
-
-  def flying!
-  end
-
-  def alive!(since:)
-    event(:OBJECT_ALIVE, "Now alive", since: since)
-  end
-
-  def lost!
-    event(:OBJECT_LOST, "Reception lost")
-  end
-
-  def on_land?
-    @sog < 3 && @cr < 1.5
-  end
-
-  def change_reception_state(new_reception_state)
-    log.debug "changed reception state from #{@reception_state} to #{new_reception_state}"
-    @reception_state = new_reception_state
-  end
-
-  def change_flying_state(new_flying_state)
-    log.debug "changed flying state from #{@flying_state} to #{new_flying_state}"
-    @flying_state = new_flying_state
-  end
-
-  def change_towing_state(new_towing_state)
-    log.debug "changed towing state from #{@towing_state} to #{new_towing_state}"
-    @towing_state = new_towing_state
-  end
-
-  def event(event_name, text, data = {})
-    @event_cb.call(self, event_name, text, data)
-  end
-
-  public
-
-  def to_s
-    "#{registration} (#{flarm_code || icao_code})"
-  end
-
-  def valid?
-    @last_update && @lat && @lng && @alt
-  end
-
-  def processed_representation
-   {
-    type: @type,
-    plane_id: @plane_id,
-    registration: @registration,
-    flarm_code: @flarm_code,
-    icao_code: @icao_code,
-    last_update: @last_update,
-
-    lat: @lat,
-    lng: @lng,
-    alt: @alt,
-    cog: @cog,
-    sog: @sog,
-    tr: @tr,
-    cr: @cr,
-
-    flying_state: @flying_state,
-   }
-  end
-end
-
-class Recorder
-  include AM::Actor
-
-  class MsgRecord < AM::Msg
-    attr_accessor :objects
-  end
-  class MsgRecordOk < AM::Msg ; end
-  class MsgRecordFailure < AM::Msg ; end
-
-  def initialize(db_config:, **args)
-    super(**args)
-
-    @db_config = db_config
-  end
-
-  def actor_boot
-    @pg = PG::Connection.open(@db_config)
-    @ins_statement = @pg.prepare('ins',
-      'INSERT INTO track_entries (at, plane_id, lat, lng, alt, cog, sog, tr, cr) ' +
-      'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)')
-  end
-
-  def handle(message)
-    case message
-    when MsgRecord
-      @pg.transaction do
-        message.objects.each do |obj|
-          @pg.exec_prepared('ins', [ obj[:at], obj[:plane_id], obj[:lat], obj[:lng], obj[:alt], obj[:cog], obj[:sog], obj[:tr], obj[:cr] ])
-        end
-      end
-
-      reply message, MsgRecordOk.new
-    else
-      super
-    end
-  end
-end
-
 
 class App < Ygg::Agent::Base
   self.app_name = 'glideradar_master'
@@ -468,7 +32,6 @@ class App < Ygg::Agent::Base
     app_config_files << File.join(File.dirname(__FILE__), '..', 'config', 'glideradar_master.conf')
     app_config_files << '/etc/yggdra/glideradar_master.conf'
   end
-
 
   def agent_boot
     @pg = PG::Connection.open(mycfg.db.to_h)
@@ -516,10 +79,14 @@ class App < Ygg::Agent::Base
     @pending_recs = {}
     @pending_acks = {}
 
-    @objects = {}
-    @updated_objects = {}
+    @traffics_by_plane_id = {}
+    @traffics_by_flarm_id = {}
+    @updated_traffics = {}
     @towplanes = {}
     @stations = {}
+
+    @planes_seen_today = {}
+    @today = nil
 
     @clock_source = nil
     @clock_timeout = delay(5.seconds) do
@@ -569,24 +136,36 @@ class App < Ygg::Agent::Base
   end
 
   def periodic_cleanup
-    objects_to_remove = []
+    traffics_to_remove = []
 
-    @objects.each do |obj_id, obj|
-      obj.check_alive(@time)
+    @traffics_by_plane_id.each do |plane_id, tra|
+      begin
+        tra.update_time(@time)
+      rescue Traffic::DataError
+      end
 
-      if @time - obj.last_update > 120.seconds
-        event(:OBJECT_REMOVED, "Obj #{obj} removed", obj_id: obj_id, obj: obj.processed_representation)
-        objects_to_remove << obj_id
+      if @time - tra.last_update > 120.seconds
+        tra.remove!
+        traffics_to_remove << plane_id
       end
     end
 
-    objects_to_remove.each do |obj_id|
-      @objects.delete obj_id
-      @towplanes.delete obj_id
+    traffics_to_remove.each do |plane_id|
+      @traffics_by_flarm_id.delete @traffics_by_plane_id[plane_id].flarm_id
+      @traffics_by_plane_id.delete plane_id
+      @towplanes.delete plane_id
     end
 
     @stations.each do |sta_id, sta|
-      sta.check_alive(@time)
+      begin
+        sta.update_time(@time)
+      rescue Station::DataError
+      end
+    end
+
+    if !@today || @today != @time.to_date
+      @today = @time.to_date
+      @planes_seen_today = {}
     end
   end
 
@@ -596,31 +175,32 @@ class App < Ygg::Agent::Base
       return
     end
 
+    msg_time = Time.parse(message[:time])
+
+    if !@clock_source
+      @clock_internal.stop!
+      @clock_source = message[:station_id]
+      @time = msg_time
+      event(:CLOCK_SYNC, "Clock synced to #{@clock_source}", clock_source: @clock_source)
+    end
+
     sta_id = message[:station_id]
 
     sta = @stations[sta_id]
     if !sta
-      sta = Station.new(name: sta_id, data: message, log: log,
-        event_cb: lambda { |sta, event, text, args|
+      sta = Station.new(now: @time, name: sta_id, data: message, log: log,
+        event_cb: lambda { |sta, event, text, now, args|
           event(event, "Station #{sta} #{text}", sta_id: sta_id, sta: sta.processed_representation, **args)
         }
       )
 
       @stations[sta_id] = sta
-
-      event(:STATION_NEW, "New station #{sta.name} found", sta_id: sta_id)
     end
 
-    sta.update(message)
-
-    if !@clock_source
-      @clock_internal.stop!
-      @clock_source = message[:station_id]
-      event(:CLOCK_SYNC, "Clock synced to #{@clock_source}", clock_source: @clock_source)
-    end
+    sta.update(data: message)
 
     if @clock_source == message[:station_id]
-      @time = Time.parse(message[:time])
+      @time = msg_time
       clock_event
     end
   end
@@ -632,60 +212,104 @@ class App < Ygg::Agent::Base
       return
     end
 
-    message[:objects].each do |obj_id, data|
-      rcv_traffic_update_object(obj_id, data, message[:station_id], delivery_tag)
+    if !@time
+      log.info "Not synced yet, ignoring traffic update"
+      @amqp.tell AM::AMQP::MsgAck.new(delivery_tag: delivery_tag)
+      return
+    end
+
+    message[:objects].each do |flarm_id, data|
+      rcv_traffic_update_traffic(flarm_id, data, message[:station_id], delivery_tag)
     end
 
     @pending_acks[delivery_tag] = true
   end
 
-  def rcv_traffic_update_object(obj_id, data, station_id, delivery_tag)
-    obj = @objects[obj_id]
-    if !obj
-      obj = Obj.new(obj_id: obj_id, data: data, source: station_id, log: log,
-        event_cb: lambda { |obj, event, text, args|
-          event(event, "Plane #{obj} #{text}", obj_id: obj_id, obj: obj.processed_representation, **args)
+  def rcv_traffic_update_traffic(flarm_id, data, station_id, delivery_tag)
+    tra = @traffics_by_flarm_id[flarm_id]
+    if !tra
+      if flarm_id =~ /^flarm:(.*)/
+        flarm_code = $1
+        res = @pg.exec_params("SELECT * FROM planes WHERE flarm_code=$1", [ flarm_code ])
+      elsif flarm_id =~ /^icao:(.*)/
+        icao_code = $1
+        res = @pg.exec_params("SELECT * FROM planes WHERE icao_code=$1", [ icao_code ])
+      else
+        log.err "Unhandled flarm_id '#{flarm_id}'"
+        return
+      end
+
+      plane_data = {}
+
+      if res.ntuples > 0
+        plane_id = res[0]['id'].to_i
+
+        plane_data = {
+          owner_name: res[0]['owner_name'],
+          home_airport: res[0]['home_airport'],
+          type_id: nil,#res[0][''],
+          type_name: res[0]['type_name'],
+          race_registration: res[0]['race_registration'],
+          registration: res[0]['registration'],
+          common_radio_frequency: res[0]['common_radio_frequency'],
+        }
+      else
+        res = @pg.exec_params("INSERT INTO planes (uuid,flarm_code,icao_code) VALUES ($1,$2,$3) RETURNING id",
+          [ SecureRandom.uuid, flarm_code, icao_code ])
+
+        plane_id = res[0]['id'].to_i
+      end
+
+      tra = Traffic.new(
+        now: @time,
+        plane_id: plane_id,
+        flarm_id: flarm_id,
+        flarm_code: flarm_code,
+        icao_code: icao_code,
+        plane_data: plane_data,
+        data: data,
+        source: station_id,
+        log: log,
+        event_cb: lambda { |tra, event, text, now, args|
+          event(event, "Traffic #{tra} #{text}", traffic: tra.traffic_update, **args)
         }
       )
 
-      if obj.type == 2
-        @towplanes[obj_id] = obj
+      if tra.type == 2
+        @towplanes[plane_id] = tra
       end
 
-      if obj.flarm_code
-        res = @pg.exec_params("SELECT * FROM planes WHERE flarm_code=$1", [ obj.flarm_code ])
-      elsif obj.icao_code
-        res = @pg.exec_params("SELECT * FROM planes WHERE icao_code=$1", [ obj.icao_code ])
-      end
-
-      if res.ntuples > 0
-        obj.plane_id = res[0]['id']
-        obj.registration = res[0]['registration']
-      else
-        res = @pg.exec_params("INSERT INTO planes (uuid,flarm_code,icao_code) VALUES ($1,$2,$3) RETURNING id",
-          [ SecureRandom.uuid, obj.flarm_code, obj.icao_code ])
-
-        obj.plane_id = res[0]['id']
-      end
-
-      @objects[obj_id] = obj
-
-      event(:OBJECT_NEW, "New object #{obj}, type #{obj.type}", obj_id: obj_id)
+      @traffics_by_plane_id[plane_id] = tra
+      @traffics_by_flarm_id[flarm_id] = tra
     else
-      obj.update(data: data, source: station_id)
+      tra.update(data: data, source: station_id)
     end
 
-    @updated_objects[obj.object_id] = obj
-  rescue Obj::DataError
+    @updated_traffics[tra.plane_id] = tra
+
+    if !@planes_seen_today[tra.plane_id]
+      res = @pg.exec_params("SELECT * FROM trk_day_planes WHERE day=$1 AND plane_id=$2", [ @time, tra.plane_id ])
+      if res.ntuples == 0
+        @pg.exec_params("INSERT INTO trk_day_planes (day, plane_id) VALUES ($1,$2) RETURNING id",
+          [ @time, tra.plane_id ])
+      end
+
+      @planes_seen_today[plane_id] = true
+    end
+
+  rescue Traffic::DataError
   end
 
-  def event(type, text, **data)
+  def event(type, text, plane_id: nil, **data)
     log.info("#{@time}: #{text}")
+
+    @pg.exec_params('INSERT INTO trk_events (at, event, plane_id, data, text, recorded_at) VALUES ($1,$2,$3,$4,$5,now())',
+                    [ @time, type, plane_id, text, data ])
 
     if @time && Time.now - @time < 30.seconds
       @amqp.tell AM::AMQP::MsgPublish.new(
         destination: mycfg.processed_traffic_exchange,
-        payload: data.merge({ text: text }),
+        payload: data.merge({ plane_id: plane_id, timestamp: @time, text: text }),
         routing_key: type.to_s,
         options: {
           type: type.to_s,
@@ -702,20 +326,15 @@ class App < Ygg::Agent::Base
     updates = []
     stations_dump = {}
 
-    @updated_objects.each do |obj_id,obj|
-      obj.updates_complete
+    @updated_traffics.each do |plane_id,tra|
+      tra.updates_complete
 
       @towplanes.each do |towplane_id, towplane|
-        towplane.check_towed(obj) if towplane != obj
+        towplane.check_towed(tra) if towplane != tra
       end
 
-      if obj.valid?
-        updates << {
-          at: obj.last_update,
-          plane_id: obj.plane_id,
-          lat: obj.lat, lng: obj.lng, alt: obj.alt,
-          cog: obj.cog, sog: obj.sog, tr: obj.tr, cr: obj.cr,
-        }
+      if tra.valid?
+        updates << tra.clone.freeze
       end
     end
 
@@ -723,26 +342,26 @@ class App < Ygg::Agent::Base
       @amqp.tell AM::AMQP::MsgPublish.new(
         destination: mycfg.processed_traffic_exchange,
         payload: {
-          objects: Hash[@updated_objects.map { |obj_id, obj| [ obj_id, obj.processed_representation ] }],
+          traffics: Hash[@updated_traffics.map { |plane_id, tra| [ plane_id, tra.traffic_update ] }],
           stations: Hash[@stations.map { |sta_id, sta| [ sta_id, sta.processed_representation ] }],
         },
-        routing_key: 'OBJECTS_UPDATE',
+        routing_key: 'TRAFFICS_UPDATE',
         options: {
-          type: 'OBJECTS_UPDATE',
+          type: 'TRAFFICS_UPDATE',
           persistent: false,
           mandatory: false,
         }
       )
     end
 
-    recmsg = Recorder::MsgRecord.new(objects: updates)
+    recmsg = Recorder::MsgRecord.new(traffics: updates)
 
     @recorder.tell(recmsg)
 
     @pending_recs[recmsg.object_id] = @pending_acks.keys
 
     @pending_acks.clear
-    @updated_objects.clear
+    @updated_traffics.clear
 
     periodic_cleanup
   end
