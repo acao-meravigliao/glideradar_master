@@ -20,6 +20,7 @@ require 'glideradar_master/task'
 require 'glideradar_master/station'
 require 'glideradar_master/traffic'
 require 'glideradar_master/recorder'
+require 'glideradar_master/stats_recorder'
 
 module GlideradarMaster
 
@@ -38,6 +39,12 @@ class App < Ygg::Agent::Base
 
     @recorder = actor_supervise_new(Recorder, {
       actor_name: :recorder,
+      db_config: mycfg.db.to_h,
+      monitored_by: self,
+    })
+
+    @stats_recorder = actor_supervise_new(StatsRecorder, {
+      actor_name: :stats_recorder,
       db_config: mycfg.db.to_h,
       monitored_by: self,
     })
@@ -226,18 +233,11 @@ class App < Ygg::Agent::Base
   end
 
   def rcv_traffic_update_traffic(flarm_id, data, station_id, delivery_tag)
+    plane_id = nil
+
     tra = @traffics_by_flarm_id[flarm_id]
     if !tra
-      if flarm_id =~ /^flarm:(.*)/
-        flarm_code = $1
-        res = @pg.exec_params("SELECT * FROM planes WHERE flarm_code=$1", [ flarm_code ])
-      elsif flarm_id =~ /^icao:(.*)/
-        icao_code = $1
-        res = @pg.exec_params("SELECT * FROM planes WHERE icao_code=$1", [ icao_code ])
-      else
-        log.err "Unhandled flarm_id '#{flarm_id}'"
-        return
-      end
+      res = @pg.exec_params("SELECT * FROM planes WHERE flarm_id=$1", [ flarm_id ])
 
       plane_data = {}
 
@@ -254,8 +254,8 @@ class App < Ygg::Agent::Base
           common_radio_frequency: res[0]['common_radio_frequency'],
         }
       else
-        res = @pg.exec_params("INSERT INTO planes (uuid,flarm_code,icao_code) VALUES ($1,$2,$3) RETURNING id",
-          [ SecureRandom.uuid, flarm_code, icao_code ])
+        res = @pg.exec_params("INSERT INTO planes (uuid,flarm_id) VALUES ($1,$2) RETURNING id",
+          [ SecureRandom.uuid, flarm_id ])
 
         plane_id = res[0]['id'].to_i
       end
@@ -264,8 +264,6 @@ class App < Ygg::Agent::Base
         now: @time,
         plane_id: plane_id,
         flarm_id: flarm_id,
-        flarm_code: flarm_code,
-        icao_code: icao_code,
         plane_data: plane_data,
         data: data,
         source: station_id,
@@ -284,6 +282,9 @@ class App < Ygg::Agent::Base
     else
       tra.update(data: data, source: station_id)
     end
+
+    @stats_recorder.tell(StatsRecorder::MsgRecord.new(flarm_id: flarm_id, plane_id: tra.plane_id, data: data,
+       station_id: station_id, time: @time))
 
     @updated_traffics[tra.plane_id] = tra
 
@@ -342,7 +343,7 @@ class App < Ygg::Agent::Base
       @amqp.tell AM::AMQP::MsgPublish.new(
         destination: mycfg.processed_traffic_exchange,
         payload: {
-          traffics: Hash[@updated_traffics.map { |plane_id, tra| [ plane_id, tra.traffic_update ] }],
+          traffics: Hash[@updated_traffics.map { |plane_id, tra| [ tra.flarm_id, tra.traffic_update ] }],
           stations: Hash[@stations.map { |sta_id, sta| [ sta_id, sta.processed_representation ] }],
         },
         routing_key: 'TRAFFICS_UPDATE',
@@ -354,10 +355,9 @@ class App < Ygg::Agent::Base
       )
     end
 
-    recmsg = Recorder::MsgRecord.new(traffics: updates)
+    recmsg = Recorder::MsgRecord.new(time: @time, traffics: updates)
 
     @recorder.tell(recmsg)
-
     @pending_recs[recmsg.object_id] = @pending_acks.keys
 
     @pending_acks.clear

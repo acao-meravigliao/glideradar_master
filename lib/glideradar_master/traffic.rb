@@ -15,8 +15,6 @@ class Traffic
   attr_accessor :type
   attr_accessor :plane_id
   attr_accessor :flarm_id
-  attr_accessor :flarm_code
-  attr_accessor :icao_code
 
   attr_accessor :owner_name
   attr_accessor :home_airport
@@ -28,6 +26,7 @@ class Traffic
 
   attr_accessor :last_update
 
+  attr_accessor :src
   attr_accessor :srcs
 
   attr_accessor :lat
@@ -48,14 +47,12 @@ class Traffic
   attr_reader :log
   public
 
-  def initialize(now:, plane_id:, flarm_id:, flarm_code:, icao_code:, data:, plane_data:, source:, log:, event_cb:)
+  def initialize(now:, plane_id:, flarm_id:, data:, plane_data:, source:, log:, event_cb:)
     @srcs = {}
 
     @type = data[:type]
     @plane_id = plane_id
     @flarm_id = flarm_id
-    @flarm_code = flarm_code
-    @icao_code = icao_code
 
     @reception_state = :unknown
     @flying_state = :unknown
@@ -86,6 +83,7 @@ class Traffic
     @new_srcs ||= {}
 
     data[:ts] = Time.parse(data[:ts])
+    data[:rcv_ts] = Time.new
 
     @last_update = data[:ts]
 
@@ -107,7 +105,10 @@ class Traffic
 
     return if @srcs.count == 0
 
-    src = @srcs.values.sort { |x| x[:ts].to_i }.last
+    src_v = @srcs.sort_by { |k, v| v[:ts].to_i }.last
+
+    @src = src_v[0]
+    src = src_v[1]
 
     @lat = src[:lat]
     @lng = src[:lng]
@@ -300,7 +301,7 @@ class Traffic
   public
 
   def to_s
-    "#{registration} (#{flarm_code || icao_code})"
+    "#{registration} (#{flarm_id})"
   end
 
   def valid?
@@ -310,8 +311,11 @@ class Traffic
   def traffic_update
    {
     type: @type,
-    plane_id: @plane_id,
+    flarm_id: @flarm_id,
     last_update: @last_update,
+
+    src: @src,
+    srcs: @srcs.keys.join(','),
 
     lat: @lat,
     lng: @lng,
@@ -328,8 +332,6 @@ class Traffic
     type: @type,
     plane_id: @plane_id,
     flarm_id: @flarm_id,
-    flarm_code: @flarm_code,
-    icao_code: @icao_code,
 
     owner_name: @owner_name,
     home_airport: @home_airport,

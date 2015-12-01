@@ -8,12 +8,15 @@
 
 module GlideradarMaster
 
-class Recorder
+class StatsRecorder
   include AM::Actor
 
   class MsgRecord < AM::Msg
+    attr_accessor :flarm_id
+    attr_accessor :data
+    attr_accessor :plane_id
+    attr_accessor :station_id
     attr_accessor :time
-    attr_accessor :traffics
   end
   class MsgRecordOk < AM::Msg ; end
   class MsgRecordFailure < AM::Msg ; end
@@ -27,20 +30,17 @@ class Recorder
   def actor_boot
     @pg = PG::Connection.open(@db_config)
     @ins_statement = @pg.prepare('ins',
-      'INSERT INTO trk_track_entries (at, plane_id, lat, lng, alt, cog, sog, tr, cr, recorded_at, src, srcs) ' +
-      'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10, $11)')
+      'INSERT INTO trk_track_stats (at, rcv_at, rec_at, src, plane_id, lat, lng, alt, cog, sog, tr, cr) ' +
+      'VALUES ($1,$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11)')
   end
 
   def handle(message)
     case message
     when MsgRecord
-      @pg.transaction do
-        message.traffics.each do |tra|
-          @pg.exec_prepared('ins',
-             [ tra.last_update, tra.plane_id, tra.lat, tra.lng, tra.alt, tra.cog, tra.sog, tra.tr,
-               tra.cr, tra.src, tra.srcs.keys.join(',') ])
-        end
-      end
+      @pg.exec_prepared('ins',
+         [ message.data[:ts], message.data[:rcv_ts], message.station_id, message.plane_id,
+           message.data[:lat], message.data[:lng], message.data[:alt], message.data[:cog], message.data[:sog],
+           message.data[:tr], message.data[:cr] ])
 
       reply message, MsgRecordOk.new
     else
