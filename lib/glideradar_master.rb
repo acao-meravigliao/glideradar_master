@@ -49,39 +49,44 @@ class App < Ygg::Agent::Base
       monitored_by: self,
     })
 
-    @msg_exchange = @amqp.ask(AM::AMQP::MsgDeclareExchange.new(
+    @amqp.ask(AM::AMQP::MsgExchangeDeclare.new(
+      channel_id: @amqp_chan,
       name: mycfg.exchange,
       type: :topic,
-      options: {
-        durable: true,
-        auto_delete: false,
-      }
-    )).value.exchange_id
+      durable: true,
+      auto_delete: false,
+    )).value
 
-    @msg_queue = @amqp.ask(AM::AMQP::MsgDeclareQueue.new(
+    @amqp.ask(AM::AMQP::MsgQueueDeclare.new(
+      channel_id: @amqp_chan,
       name: mycfg.queue,
-      options: {
-        durable: true,
-        auto_delete: false,
+      durable: true,
+      auto_delete: false,
+      arguments: {
         :'x-message-ttl' => (3 * 86400 * 1000),
-      }
-    )).value.queue_id
+      },
+    )).value
 
-    @amqp.ask(AM::AMQP::MsgBind.new(queue_id: @msg_queue, exchange_id: @msg_exchange, options: { routing_key: '#' })).value
+    @amqp.ask(AM::AMQP::MsgQueueBind.new(
+      channel_id: @amqp_chan,
+      queue_name: mycfg.queue,
+      exchange_name: mycfg.exchange,
+      routing_key: '#'
+    )).value
 
-    @msg_consumer = @amqp.ask(AM::AMQP::MsgSubscribe.new(
-      queue_id: @msg_queue,
+    @msg_consumer = @amqp.ask(AM::AMQP::MsgConsume.new(
+      channel_id: @amqp_chan,
+      queue_name: mycfg.queue,
       send_to: self.actor_ref,
-      manual_ack: true)).value.consumer_tag
+    )).value.consumer_tag
 
-    @processed_exchange = @amqp.ask(AM::AMQP::MsgDeclareExchange.new(
+    @processed_exchange = @amqp.ask(AM::AMQP::MsgExchangeDeclare.new(
+      channel_id: @amqp_chan,
       name: mycfg.processed_traffic_exchange,
       type: :topic,
-      options: {
-        durable: true,
-        auto_delete: false,
-      }
-    )).value.exchange_id
+      durable: true,
+      auto_delete: false,
+    )).value
 
     @pending_recs = {}
     @pending_acks = {}
@@ -114,16 +119,17 @@ class App < Ygg::Agent::Base
     case message
     when AM::AMQP::MsgDelivery
 
-      if message.delivery_info.consumer_tag == @msg_consumer
-        case message.properties[:type]
+      if message.consumer_tag == @msg_consumer
+        case message.headers[:type]
         when 'STATION_UPDATE'
-          rcv_station_update(message.payload.deep_symbolize_keys!)
-          @amqp.tell AM::AMQP::MsgAck.new(delivery_tag: message.delivery_info.delivery_tag)
+          payload = JSON.parse(message.payload).deep_symbolize_keys!
+          rcv_station_update(payload)
+          @amqp.tell AM::AMQP::MsgAck.new(channel_id: @amqp_chan, delivery_tag: message.delivery_tag)
         when 'TRAFFIC_UPDATE'
-          rcv_traffic_update(message.payload.deep_symbolize_keys!,
-                             delivery_tag: message.delivery_info.delivery_tag)
+          payload = JSON.parse(message.payload).deep_symbolize_keys!
+          rcv_traffic_update(payload, delivery_tag: message.delivery_tag)
         else
-          @amqp.tell AM::AMQP::MsgAck.new(delivery_tag: message.delivery_info.delivery_tag)
+          @amqp.tell AM::AMQP::MsgAck.new(channel_id: @amqp_chan, delivery_tag: message.delivery_tag)
         end
       else
         super
@@ -132,7 +138,7 @@ class App < Ygg::Agent::Base
       delivery_tags = @pending_recs[message.in_reply_to.object_id]
       if delivery_tags
         delivery_tags.each do |delivery_tag|
-          @amqp.tell AM::AMQP::MsgAck.new(delivery_tag: delivery_tag)
+          @amqp.tell AM::AMQP::MsgAck.new(channel_id: @amqp_chan, delivery_tag: delivery_tag)
         end
       else
         log.err "Unable to find message to acknowledge!"
@@ -215,13 +221,13 @@ class App < Ygg::Agent::Base
   def rcv_traffic_update(message, delivery_tag:)
     if !message[:station_id]
       log.warn "Spurious data received: missing station_id from TRAFFIC_UPDATE"
-      @amqp.tell AM::AMQP::MsgAck.new(delivery_tag: delivery_tag)
+      @amqp.tell AM::AMQP::MsgAck.new(channel_id: @amqp_chan, delivery_tag: delivery_tag)
       return
     end
 
     if !@time
       log.info "Not synced yet, ignoring traffic update"
-      @amqp.tell AM::AMQP::MsgAck.new(delivery_tag: delivery_tag)
+      @amqp.tell AM::AMQP::MsgAck.new(channel_id: @amqp_chan, delivery_tag: delivery_tag)
       return
     end
 
@@ -309,13 +315,15 @@ class App < Ygg::Agent::Base
 
     if @time && Time.now - @time < 30.seconds
       @amqp.tell AM::AMQP::MsgPublish.new(
-        destination: mycfg.processed_traffic_exchange,
-        payload: data.merge({ plane_id: plane_id, timestamp: @time, text: text }),
+        channel_id: @amqp_chan,
+        exchange: mycfg.processed_traffic_exchange,
+        payload: data.merge({ plane_id: plane_id, timestamp: @time, text: text }).to_json,
         routing_key: type.to_s,
-        options: {
+        persistant: false,
+        mandatory: false,
+        headers: {
           type: type.to_s,
-          persistent: false,
-          mandatory: false,
+          content_type: 'application/json',
         }
       )
     end
@@ -341,16 +349,18 @@ class App < Ygg::Agent::Base
 
     if Time.now - @time < 30.seconds
       @amqp.tell AM::AMQP::MsgPublish.new(
-        destination: mycfg.processed_traffic_exchange,
+        channel_id: @amqp_chan,
+        exchange: mycfg.processed_traffic_exchange,
         payload: {
           traffics: Hash[@updated_traffics.map { |plane_id, tra| [ tra.flarm_id, tra.traffic_update ] }],
           stations: Hash[@stations.map { |sta_id, sta| [ sta_id, sta.processed_representation ] }],
-        },
+        }.to_json,
         routing_key: 'TRAFFICS_UPDATE',
-        options: {
+        persistant: false,
+        mandatory: false,
+        headers: {
           type: 'TRAFFICS_UPDATE',
-          persistent: false,
-          mandatory: false,
+          content_type: 'application/json',
         }
       )
     end
