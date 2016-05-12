@@ -241,7 +241,7 @@ class App < Ygg::Agent::Base
 
     tra = @traffics_by_flarm_id[flarm_id]
     if !tra
-      res = @pg.exec_params("SELECT * FROM acao_planes WHERE flarm_id=$1", [ flarm_id ])
+      res = @pg.exec_params("SELECT * FROM acao_planes WHERE flarm_code=$1", [ flarm_id ])
 
       plane_data = {}
 
@@ -258,7 +258,7 @@ class App < Ygg::Agent::Base
           common_radio_frequency: res[0]['common_radio_frequency'],
         }
       else
-        res = @pg.exec_params("INSERT INTO acao_planes (uuid,flarm_id) VALUES ($1,$2) RETURNING id",
+        res = @pg.exec_params("INSERT INTO acao_planes (uuid,flarm_code) VALUES ($1,$2) RETURNING id",
           [ SecureRandom.uuid, flarm_id ])
 
         plane_id = res[0]['id'].to_i
