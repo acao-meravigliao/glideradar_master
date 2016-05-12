@@ -8,8 +8,6 @@
 
 require 'ygg/agent/base'
 
-require 'ygg/app/line_buffer'
-
 require 'securerandom'
 require 'time'
 
@@ -243,7 +241,7 @@ class App < Ygg::Agent::Base
 
     tra = @traffics_by_flarm_id[flarm_id]
     if !tra
-      res = @pg.exec_params("SELECT * FROM planes WHERE flarm_id=$1", [ flarm_id ])
+      res = @pg.exec_params("SELECT * FROM acao_planes WHERE flarm_id=$1", [ flarm_id ])
 
       plane_data = {}
 
@@ -260,7 +258,7 @@ class App < Ygg::Agent::Base
           common_radio_frequency: res[0]['common_radio_frequency'],
         }
       else
-        res = @pg.exec_params("INSERT INTO planes (uuid,flarm_id) VALUES ($1,$2) RETURNING id",
+        res = @pg.exec_params("INSERT INTO acao_planes (uuid,flarm_id) VALUES ($1,$2) RETURNING id",
           [ SecureRandom.uuid, flarm_id ])
 
         plane_id = res[0]['id'].to_i
@@ -319,7 +317,7 @@ class App < Ygg::Agent::Base
         exchange: mycfg.processed_traffic_exchange,
         payload: data.merge({ plane_id: plane_id, timestamp: @time, text: text }).to_json,
         routing_key: type.to_s,
-        persistant: false,
+        persistent: false,
         mandatory: false,
         headers: {
           type: type.to_s,
@@ -356,7 +354,7 @@ class App < Ygg::Agent::Base
           stations: Hash[@stations.map { |sta_id, sta| [ sta_id, sta.processed_representation ] }],
         }.to_json,
         routing_key: 'TRAFFICS_UPDATE',
-        persistant: false,
+        persistent: false,
         mandatory: false,
         headers: {
           type: 'TRAFFICS_UPDATE',
