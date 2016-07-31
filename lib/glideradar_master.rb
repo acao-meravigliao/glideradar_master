@@ -113,7 +113,7 @@ class App < Ygg::Agent::Base
     end
   end
 
-  def handle(message)
+  def actor_handle(message)
     case message
     when AM::AMQP::MsgDelivery
 
