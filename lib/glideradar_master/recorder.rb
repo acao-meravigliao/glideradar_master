@@ -42,7 +42,7 @@ class Recorder
         end
       end
 
-      reply message, MsgRecordOk.new
+      actor_reply message, MsgRecordOk.new
     else
       super
     end

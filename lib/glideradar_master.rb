@@ -35,16 +35,14 @@ class App < Ygg::Agent::Base
   def agent_boot
     @pg = PG::Connection.open(mycfg.db.to_h)
 
-    @recorder = actor_supervise_new(Recorder, {
+    @recorder = actor_supervise_new(Recorder, config: {
       actor_name: :recorder,
       db_config: mycfg.db.to_h,
-      monitored_by: self,
     })
 
-    @stats_recorder = actor_supervise_new(StatsRecorder, {
+    @stats_recorder = actor_supervise_new(StatsRecorder, config: {
       actor_name: :stats_recorder,
       db_config: mycfg.db.to_h,
-      monitored_by: self,
     })
 
     @amqp.ask(AM::AMQP::MsgExchangeDeclare.new(

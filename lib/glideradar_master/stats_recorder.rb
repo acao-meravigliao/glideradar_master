@@ -42,7 +42,7 @@ class StatsRecorder
            message.data[:lat], message.data[:lng], message.data[:alt], message.data[:cog], message.data[:sog],
            message.data[:tr], message.data[:cr] ])
 
-      reply message, MsgRecordOk.new
+      actor_reply message, MsgRecordOk.new
     else
       super
     end
