@@ -31,7 +31,7 @@ class Recorder
       'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10, $11)')
   end
 
-  def handle(message)
+  def actor_handle(message)
     case message
     when MsgRecord
       @pg.transaction do
@@ -42,7 +42,7 @@ class Recorder
         end
       end
 
-      reply message, MsgRecordOk.new
+      actor_reply message, MsgRecordOk.new
     else
       super
     end
