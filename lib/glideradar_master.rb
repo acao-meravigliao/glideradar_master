@@ -87,13 +87,13 @@ class App < Ygg::Agent::Base
     @pending_recs = {}
     @pending_acks = {}
 
-    @traffics_by_plane_id = {}
+    @traffics_by_aircraft_id = {}
     @traffics_by_flarm_id = {}
     @updated_traffics = {}
     @towplanes = {}
     @stations = {}
 
-    @planes_seen_today = {}
+    @aircrafts_seen_today = {}
     @today = nil
 
     @clock_source = nil
@@ -147,7 +147,7 @@ class App < Ygg::Agent::Base
   def periodic_cleanup
     traffics_to_remove = []
 
-    @traffics_by_plane_id.each do |plane_id, tra|
+    @traffics_by_aircraft_id.each do |aircraft_id, tra|
       begin
         tra.update_time(@time)
       rescue Traffic::DataError
@@ -155,14 +155,14 @@ class App < Ygg::Agent::Base
 
       if @time - tra.last_update > 120.seconds
         tra.remove!
-        traffics_to_remove << plane_id
+        traffics_to_remove << aircraft_id
       end
     end
 
-    traffics_to_remove.each do |plane_id|
-      @traffics_by_flarm_id.delete @traffics_by_plane_id[plane_id].flarm_id
-      @traffics_by_plane_id.delete plane_id
-      @towplanes.delete plane_id
+    traffics_to_remove.each do |aircraft_id|
+      @traffics_by_flarm_id.delete @traffics_by_aircraft_id[aircraft_id].flarm_id
+      @traffics_by_aircraft_id.delete aircraft_id
+      @towplanes.delete aircraft_id
     end
 
     @stations.each do |sta_id, sta|
@@ -174,7 +174,7 @@ class App < Ygg::Agent::Base
 
     if !@today || @today != @time.to_date
       @today = @time.to_date
-      @planes_seen_today = {}
+      @aircrafts_seen_today = {}
     end
   end
 
@@ -235,18 +235,18 @@ class App < Ygg::Agent::Base
   end
 
   def rcv_traffic_update_traffic(flarm_id, data, station_id, delivery_tag)
-    plane_id = nil
+    aircraft_id = nil
 
     tra = @traffics_by_flarm_id[flarm_id]
     if !tra
-      res = @pg.exec_params("SELECT * FROM acao_planes WHERE flarm_code=$1", [ flarm_id ])
+      res = @pg.exec_params("SELECT acao_aircrafts.* FROM acao_aircrafts JOIN acao_trackers ON acao_aircrafts.id=acao_trackers.aircraft_id WHERE acao_trackers.type='FLARM' and acao_trackers.identifier=$1", [ flarm_id ])
 
-      plane_data = {}
+      aircraft_data = {}
 
       if res.ntuples > 0
-        plane_id = res[0]['id'].to_i
+        aircraft_id = res[0]['id'].to_i
 
-        plane_data = {
+        aircraft_data = {
           owner_name: res[0]['owner_name'],
           home_airport: res[0]['home_airport'],
           type_id: nil,#res[0][''],
@@ -256,17 +256,17 @@ class App < Ygg::Agent::Base
           common_radio_frequency: res[0]['common_radio_frequency'],
         }
       else
-        res = @pg.exec_params("INSERT INTO acao_planes (uuid,flarm_code) VALUES ($1,$2) RETURNING id",
+        res = @pg.exec_params("INSERT INTO acao_aircrafts (uuid,flarm_code) VALUES ($1,$2) RETURNING id",
           [ SecureRandom.uuid, flarm_id ])
 
-        plane_id = res[0]['id'].to_i
+        aircraft_id = res[0]['id'].to_i
       end
 
       tra = Traffic.new(
         now: @time,
-        plane_id: plane_id,
+        aircraft_id: aircraft_id,
         flarm_id: flarm_id,
-        plane_data: plane_data,
+        aircraft_data: aircraft_data,
         data: data,
         source: station_id,
         log: log,
@@ -276,44 +276,44 @@ class App < Ygg::Agent::Base
       )
 
       if tra.type == 2
-        @towplanes[plane_id] = tra
+        @towplanes[aircraft_id] = tra
       end
 
-      @traffics_by_plane_id[plane_id] = tra
+      @traffics_by_aircraft_id[aircraft_id] = tra
       @traffics_by_flarm_id[flarm_id] = tra
     else
       tra.update(data: data, source: station_id)
     end
 
-    @stats_recorder.tell(StatsRecorder::MsgRecord.new(flarm_id: flarm_id, plane_id: tra.plane_id, data: data,
+    @stats_recorder.tell(StatsRecorder::MsgRecord.new(flarm_id: flarm_id, aircraft_id: tra.aircraft_id, data: data,
        station_id: station_id, time: @time))
 
-    @updated_traffics[tra.plane_id] = tra
+    @updated_traffics[tra.aircraft_id] = tra
 
-    if !@planes_seen_today[tra.plane_id]
-      res = @pg.exec_params("SELECT * FROM trk_day_planes WHERE day=$1 AND plane_id=$2", [ @time, tra.plane_id ])
+    if !@aircrafts_seen_today[tra.aircraft_id]
+      res = @pg.exec_params("SELECT * FROM trk_day_aircrafts WHERE day=$1 AND aircraft_id=$2", [ @time, tra.aircraft_id ])
       if res.ntuples == 0
-        @pg.exec_params("INSERT INTO trk_day_planes (day, plane_id) VALUES ($1,$2) RETURNING id",
-          [ @time, tra.plane_id ])
+        @pg.exec_params("INSERT INTO trk_day_aircrafts (day, aircraft_id) VALUES ($1,$2) RETURNING id",
+          [ @time, tra.aircraft_id ])
       end
 
-      @planes_seen_today[plane_id] = true
+      @aircrafts_seen_today[aircraft_id] = true
     end
 
   rescue Traffic::DataError
   end
 
-  def event(type, text, plane_id: nil, **data)
+  def event(type, text, aircraft_id: nil, **data)
     log.info("#{@time}: #{text}")
 
-    @pg.exec_params('INSERT INTO trk_events (at, event, plane_id, data, text, recorded_at) VALUES ($1,$2,$3,$4,$5,now())',
-                    [ @time, type, plane_id, text, data ])
+    @pg.exec_params('INSERT INTO trk_events (at, event, aircraft_id, data, text, recorded_at) VALUES ($1,$2,$3,$4,$5,now())',
+                    [ @time, type, aircraft_id, text, data ])
 
     if @time && Time.now - @time < 30.seconds
       @amqp.tell AM::AMQP::MsgPublish.new(
         channel_id: @amqp_chan,
         exchange: mycfg.processed_traffic_exchange,
-        payload: data.merge({ plane_id: plane_id, timestamp: @time, text: text }).to_json,
+        payload: data.merge({ aircraft_id: aircraft_id, timestamp: @time, text: text }).to_json,
         routing_key: type.to_s,
         persistent: false,
         mandatory: false,
@@ -331,7 +331,7 @@ class App < Ygg::Agent::Base
     updates = []
     stations_dump = {}
 
-    @updated_traffics.each do |plane_id,tra|
+    @updated_traffics.each do |aircraft_id,tra|
       tra.updates_complete
 
       @towplanes.each do |towplane_id, towplane|
@@ -348,7 +348,7 @@ class App < Ygg::Agent::Base
         channel_id: @amqp_chan,
         exchange: mycfg.processed_traffic_exchange,
         payload: {
-          traffics: Hash[@updated_traffics.map { |plane_id, tra| [ tra.flarm_id, tra.traffic_update ] }],
+          traffics: Hash[@updated_traffics.map { |aircraft_id, tra| [ tra.flarm_id, tra.traffic_update ] }],
           stations: Hash[@stations.map { |sta_id, sta| [ sta_id, sta.processed_representation ] }],
         }.to_json,
         routing_key: 'TRAFFICS_UPDATE',

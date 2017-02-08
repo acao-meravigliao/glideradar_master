@@ -14,7 +14,7 @@ class StatsRecorder
   class MsgRecord < AM::Msg
     attr_accessor :flarm_id
     attr_accessor :data
-    attr_accessor :plane_id
+    attr_accessor :aircraft_id
     attr_accessor :station_id
     attr_accessor :time
   end
@@ -30,7 +30,7 @@ class StatsRecorder
   def actor_boot
     @pg = PG::Connection.open(@db_config)
     @ins_statement = @pg.prepare('ins',
-      'INSERT INTO trk_track_stats (at, rcv_at, rec_at, src, plane_id, lat, lng, alt, cog, sog, tr, cr) ' +
+      'INSERT INTO trk_track_stats (at, rcv_at, rec_at, src, aircraft_id, lat, lng, alt, cog, sog, tr, cr) ' +
       'VALUES ($1,$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11)')
   end
 
@@ -38,7 +38,7 @@ class StatsRecorder
     case message
     when MsgRecord
       @pg.exec_prepared('ins',
-         [ message.data[:ts], message.data[:rcv_ts], message.station_id, message.plane_id,
+         [ message.data[:ts], message.data[:rcv_ts], message.station_id, message.aircraft_id,
            message.data[:lat], message.data[:lng], message.data[:alt], message.data[:cog], message.data[:sog],
            message.data[:tr], message.data[:cr] ])
 

@@ -13,7 +13,7 @@ class Traffic
   end
 
   attr_accessor :type
-  attr_accessor :plane_id
+  attr_accessor :aircraft_id
   attr_accessor :flarm_id
 
   attr_accessor :owner_name
@@ -47,11 +47,11 @@ class Traffic
   attr_reader :log
   public
 
-  def initialize(now:, plane_id:, flarm_id:, data:, plane_data:, source:, log:, event_cb:)
+  def initialize(now:, aircraft_id:, flarm_id:, data:, aircraft_data:, source:, log:, event_cb:)
     @srcs = {}
 
     @type = data[:type]
-    @plane_id = plane_id
+    @aircraft_id = aircraft_id
     @flarm_id = flarm_id
 
     @reception_state = :unknown
@@ -61,18 +61,18 @@ class Traffic
     @log = log
     @event_cb = event_cb
 
-    @owner_name = plane_data[:owner_name]
-    @home_airport = plane_data[:home_airport]
-    @type_id = plane_data[:type_id]
-    @type_name = plane_data[:type_name]
-    @race_registration = plane_data[:race_registration]
-    @registration = plane_data[:registration]
-    @common_radio_frequency = plane_data[:common_radio_frequency]
+    @owner_name = aircraft_data[:owner_name]
+    @home_airport = aircraft_data[:home_airport]
+    @type_id = aircraft_data[:type_id]
+    @type_name = aircraft_data[:type_name]
+    @race_registration = aircraft_data[:race_registration]
+    @registration = aircraft_data[:registration]
+    @common_radio_frequency = aircraft_data[:common_radio_frequency]
 
     @now = now
 
     event(:TRAFFIC_NEW, "New traffic, type #{@type}",
-      plane_info: plane_data,
+      aircraft_info: aircraft_data,
     )
 
     update(data: data, source: source)
@@ -254,7 +254,7 @@ class Traffic
   def on_land!
     case @towing_state
     when :towing
-      log.err "Towplane landed while towing?!"
+      log.err "Towaircraft landed while towing?!"
       event(:TOW_ANOMALY, 'Landed while towing?!')
       change_towing_state(:unknown)
     when :maybe
@@ -295,7 +295,7 @@ class Traffic
   end
 
   def event(event_name, text, data = {})
-    @event_cb.call(self, event_name, text, now, data.merge!(plane_id: @plane_id))
+    @event_cb.call(self, event_name, text, now, data.merge!(aircraft_id: @aircraft_id))
   end
 
   public
@@ -327,10 +327,10 @@ class Traffic
    }
   end
 
-  def plane_info
+  def aircraft_info
    {
     type: @type,
-    plane_id: @plane_id,
+    aircraft_id: @aircraft_id,
     flarm_id: @flarm_id,
 
     owner_name: @owner_name,
