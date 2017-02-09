@@ -256,10 +256,12 @@ class App < Ygg::Agent::Base
           common_radio_frequency: res[0]['common_radio_frequency'],
         }
       else
-        res = @pg.exec_params("INSERT INTO acao_aircrafts (uuid,flarm_code) VALUES ($1,$2) RETURNING id",
-          [ SecureRandom.uuid, flarm_id ])
+        res = @pg.exec_params("INSERT INTO acao_aircrafts DEFAULT VALUES RETURNING id", [ ])
 
         aircraft_id = res[0]['id'].to_i
+
+        res = @pg.exec_params("INSERT INTO acao_trackers (aircraft_id, type, identifier) VALUES ($1, 'FLARM', $2) RETURNING id", [ aircraft_id, flarm_id ])
+
       end
 
       tra = Traffic.new(
