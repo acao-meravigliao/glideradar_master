@@ -32,6 +32,12 @@ class App < Ygg::Agent::Base
     app_config_files << '/etc/yggdra/glideradar_master.conf'
   end
 
+  def prepare_options(o)
+    super
+
+    o.on('--msg-dump-dir DIR', 'Create a daily dump of raw received messages') { |v| config.msg_dump_dir = v }
+  end
+
   def agent_boot
     @pg = PG::Connection.open(mycfg.db.to_h)
     @pg.type_map_for_results = PG::BasicTypeMapForResults.new(@pg)
@@ -106,7 +112,6 @@ log.warn "AIRFIELD = #{airfield}"
     @towplanes = {}
     @stations = {}
 
-    @aircrafts_seen_today = {}
     @today = nil
 
     @clock_source = nil
@@ -123,7 +128,7 @@ log.warn "AIRFIELD = #{airfield}"
       end
     end
 
-    @dump_file = File.open('/var/lib/yggdra/messages_dump', 'ab')
+    open_dump_file if config.msg_dump_dir
   end
 
   def actor_handle(message)
@@ -220,8 +225,6 @@ log.warn "AIRFIELD = #{airfield}"
   end
 
   def rcv_traffic_update_traffic(flarm_id, data, station_id, delivery_tag)
-    aircraft_id = nil
-
     tra = @traffics_by_flarm_id[flarm_id]
     if !tra
       if !(match = /^(flarm|icao):(.*)$/.match(flarm_id))
@@ -246,10 +249,10 @@ log.warn "AIRFIELD = #{airfield}"
       )
 
       if tra.type == 2
-        @towplanes[aircraft_id] = tra
+        @towplanes[tra.aircraft_id] = tra
       end
 
-      @traffics_by_aircraft_id[aircraft_id] = tra
+      @traffics_by_aircraft_id[tra.aircraft_id] = tra
       @traffics_by_flarm_id[flarm_id] = tra
     else
       tra.update(data: data, source: station_id)
@@ -259,16 +262,6 @@ log.warn "AIRFIELD = #{airfield}"
        station_id: station_id, time: @now))
 
     @updated_traffics[tra.aircraft_id] = tra
-
-#    if !@aircrafts_seen_today[tra.aircraft_id]
-#      res = @pg.exec_params("SELECT * FROM trk_day_aircrafts WHERE day=$1 AND aircraft_id=$2", [ @now, tra.aircraft_id ])
-#      if res.ntuples == 0
-#        @pg.exec_params("INSERT INTO trk_day_aircrafts (day, aircraft_id) VALUES ($1,$2) RETURNING id",
-#          [ @now, tra.aircraft_id ])
-#      end
-#
-#      @aircrafts_seen_today[aircraft_id] = true
-#    end
 
   rescue Traffic::DataError
   end
@@ -301,9 +294,11 @@ log.warn "AIRFIELD = #{airfield}"
     updates = []
     stations_dump = {}
 
-    @updated_traffics.each do |aircraft_id,tra|
+    @traffics_by_aircraft_id.each do |aircraft_id,tra|
       tra.clock_event(@now)
+    end
 
+    @updated_traffics.each do |aircraft_id,tra|
       @towplanes.each do |towplane_id, towplane|
         towplane.check_towed(tra) if towplane != tra
       end
@@ -348,9 +343,8 @@ log.warn "AIRFIELD = #{airfield}"
     @pending_acks.clear
     @updated_traffics.clear
 
-
-    if !@today || @today != @now.to_date
-      @today = @now.to_date
+    @today ||= @now.to_date
+    if @today != @now.to_date
       day_changed!
     end
 
@@ -375,7 +369,16 @@ log.warn "AIRFIELD = #{airfield}"
   end
 
   def day_changed!
-    @aircrafts_seen_today = {}
+    log.warn "------------- Day Changed --------------"
+
+    # Cleanup timetable, removing flights with no takeoff/landing
+
+    open_dump_file if config.msg_dump_dir
+  end
+
+  def open_dump_file
+    @dump_file.close if @dump_file
+    @dump_file = File.open(File.join(config.msg_dump_dir, Time.now.strftime('dump-%Y%m%d')), 'ab')
   end
 
 end

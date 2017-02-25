@@ -40,13 +40,33 @@ class Traffic
 
   attr_reader :reception_state
   attr_reader :flying_state
-  attr_reader :towing_state
+  attr_reader :tow_state
 
   attr_reader :now
 
   protected
   attr_reader :log
   public
+
+  FLARM_TYPES = {
+    0x0 => 'unknown',
+    0x1 => 'glider',
+    0x2 => 'tow plane',
+    0x3 => 'helicopter',
+    0x4 => 'parachute',
+    0x5 => 'drop plane',
+    0x6 => 'fixed hang-glider',
+    0x7 => 'soft para-glider',
+    0x8 => 'powered aircraft',
+    0x9 => 'jet aircraft',
+    0xA => 'UFO',
+    0xB => 'balloon',
+    0xC => 'blimp, zeppelin',
+    0xD => 'UAV',
+    0xF => 'static'
+  }.freeze
+
+  TOWPLANE_TYPE = 0x2
 
   def initialize(now:, flarm_identifier_type:, flarm_identifier:, airfields:, data:, source:, pg:, log:, event_cb:)
     @now = now
@@ -69,7 +89,7 @@ class Traffic
 
     @reception_state = :unknown
     @flying_state = :unknown
-    @towing_state = :unknown
+    @tow_state = :unknown
 
     @pg.transaction do
       res = @pg.exec_params("SELECT * FROM acao_aircrafts WHERE #{flarm_identifier_type}_identifier=$1", [ flarm_identifier ])
@@ -90,7 +110,7 @@ class Traffic
       end
     end
 
-    event(:TRAFFIC_NEW, "New traffic, type #{@type}",
+    event(:TRAFFIC_NEW, "New traffic, type (#{@type})=#{FLARM_TYPES[@type]}",
       aircraft_info: aircraft_info,
     )
 
@@ -113,6 +133,11 @@ class Traffic
   def update(data:, source:)
     data[:ts] = Time.parse(data[:ts])
     data[:rcv_ts] = Time.new
+
+    if data[:ts] > @now + 5.seconds
+      log.error "Received updates from the future??"
+      return
+    end
 
     @elabuf << data
 
@@ -212,9 +237,6 @@ class Traffic
 
   def lookup_airfield(lat:, lng:, alt:)
     (icao_code, airfield) = @airfields.find do |airfield_icao, airfield|
-
-log.warn("Match #{airfield_icao} DIST=#{dist(lat1: lat, lng1: lng, lat2: airfield[:lat], lng2: airfield[:lng])} RADI=#{airfield[:radius]} ALT=#{(alt - airfield[:alt]).abs}")
-
       dist(lat1: lat, lng1: lng, lat2: airfield[:lat], lng2: airfield[:lng]) < airfield[:radius] &&
         (alt - airfield[:alt]).abs < 50
     end
@@ -236,47 +258,64 @@ log.warn("Match #{airfield_icao} DIST=#{dist(lat1: lat, lng1: lng, lat2: airfiel
                         ((other_tra.lat - lat) * 1854 * 60)**2 +
                         ((other_tra.lng - lng) * 1854 * 60 * Math.cos(lat / 180 * Math::PI))**2 )
 
-    case @towing_state
+    case @tow_state
     when :unknown, :tow_released
-      if @flying_state == :flying && other_tra.flying_state == :flying && pseudist < 250
+      if @flying_state == :flying && other_tra.flying_state == :flying && other_tra.type == TOWPLANE_TYPE &&  pseudist < 250
 
-        if @towing_state == :unknown
-          change_towing_state(:maybe)
+        if @tow_state == :unknown
+          change_tow_state(:maybe)
         else
-          change_towing_state(:maybe_after_towing)
+          change_tow_state(:maybe_after_towing)
         end
 
-        @towing_glider = other_tra
-        @towing_cum_distance = pseudist
-        @towing_samples = 1
-        @towing_since = @timestamp
+        @tow_plane = other_tra
+        @tow_cum_distance = pseudist
+        @tow_samples = 1
+        @tow_since = @timestamp
       end
-    when :maybe, :maybe_after_towing
-      if other_tra == @towing_glider
-        @towing_cum_distance += pseudist
-        @towing_samples += 1
 
-        if @towing_samples > 10
-  log.warn "TOWCUM #{@towing_cum_distance}"
-          if @towing_cum_distance < 2000
-            if @towing_state == :maybe_after_towing
+    when :maybe, :maybe_after_towing
+      if other_tra == @tow_plane
+        @tow_cum_distance += pseudist
+        @tow_samples += 1
+
+        if @tow_samples > 10
+  log.warn "TOWCUM #{@tow_cum_distance}"
+          if @tow_cum_distance < 2000
+            if @tow_state == :maybe_after_towing
               log.err "Tow detected in tow_released. Missed landing?"
               event(:TOW_ANOMALY, 'tow detected in tow_released. Missed landing?')
             end
 
-            change_towing_state(:towing)
-            event(:TOW_STARTED, "tow started with #{@towing_glider}", towing: @towing_glider)
+            @pg.transaction do
+              check_timetable_entry
+              @tow_plane.check_timetable_entry
+
+              res = @pg.exec_params("UPDATE acao_timetable_entries SET towed_by_id=$2  WHERE id=$1",
+                       [ @timetable_entry_id, @tow_plane.aircraft_id ])
+            end
+
+            change_tow_state(:towing)
+            event(:TOW_STARTED, "tow started tow_plane=#{@tow_plane}", tow_plane: @tow_plane)
           else
-            change_towing_state(:unknown)
-            @towing_glider = nil
+            change_tow_state(:unknown)
+            @tow_plane = nil
           end
         end
       end
 
     when :towing
-      if other_tra == @towing_glider && pseudist > 750
-        change_towing_state(:tow_released)
-        event(:TOW_RELEASED, 'tow released', towing: @towing_glider, duration: @timestamp - @towing_since)
+      if other_tra == @tow_plane && pseudist > 750
+
+        @pg.transaction do
+          check_timetable_entry
+
+          res = @pg.exec_params("UPDATE acao_timetable_entries SET tow_duration=$2, tow_height=$3  WHERE id=$1",
+                   [ @timetable_entry_id, @timestamp - @tow_since, @alt ])
+        end
+
+        change_tow_state(:tow_released)
+        event(:TOW_RELEASED, 'tow released', tow_plane: @tow_plane, duration: @timestamp - @tow_since)
       end
     end
   end
@@ -291,7 +330,7 @@ log.warn("Match #{airfield_icao} DIST=#{dist(lat1: lat, lng1: lng, lat2: airfiel
     case @reception_state
     when :unknown, :lost
     when :alive
-      if !@timestamp || @now - @timestamp > 10.seconds
+      if @elabuf.size == 0 && @timestamp && @now - @timestamp > 10.seconds
         change_reception_state(:lost)
         lost!
       end
@@ -306,8 +345,6 @@ log.warn("Match #{airfield_icao} DIST=#{dist(lat1: lat, lng1: lng, lat2: airfiel
 
       res = @pg.exec_params("INSERT INTO core_locations (lat, lng, alt) VALUES ($1, $2, $3) RETURNING id", [ lat, lng, alt ])
       location_id = res[0]['id']
-
-      log.warn("TAKEOFF =======================> ENTRY_ID = #{@timetable_entry_id}")
 
       res = @pg.exec_params("UPDATE acao_timetable_entries SET takeoff_at=$1, takeoff_location_id=$2, takeoff_airfield_id=$3 WHERE id=$4",
                [ timestamp, location_id, airfield ? airfield[:id] : nil, @timetable_entry_id ])
@@ -326,8 +363,6 @@ log.warn("Match #{airfield_icao} DIST=#{dist(lat1: lat, lng1: lng, lat2: airfiel
       res = @pg.exec_params("INSERT INTO core_locations (lat, lng, alt) VALUES ($1, $2, $3) RETURNING id", [ lat, lng, alt ])
       location_id = res[0]['id']
 
-      log.warn("LANDING =======================> ENTRY_ID = #{@timetable_entry_id}")
-
       res = @pg.exec_params("UPDATE acao_timetable_entries SET landing_at=$1, landing_location_id=$2, landing_airfield_id=$3 WHERE id=$4",
                [ timestamp, location_id, airfield ? airfield[:id] : nil, @timetable_entry_id ])
     end
@@ -337,15 +372,15 @@ log.warn("Match #{airfield_icao} DIST=#{dist(lat1: lat, lng1: lng, lat2: airfiel
   end
 
   def on_land!
-    case @towing_state
+    case @tow_state
     when :towing
       log.err "Towplane landed while towing?!"
       event(:TOW_ANOMALY, 'Landed while towing?!')
-      change_towing_state(:unknown)
+      change_tow_state(:unknown)
     when :maybe
-      change_towing_state(:unknown)
+      change_tow_state(:unknown)
     when :tow_released
-      change_towing_state(:unknown)
+      change_tow_state(:unknown)
     end
   end
 
@@ -366,7 +401,7 @@ log.warn("Match #{airfield_icao} DIST=#{dist(lat1: lat, lng1: lng, lat2: airfiel
   end
 
   def change_reception_state(new_reception_state)
-    log.debug "changed reception state from #{@reception_state} to #{new_reception_state}"
+    log.debug "#{self} changed reception state from #{@reception_state} to #{new_reception_state}"
 
     @reception_state = new_reception_state
 
@@ -374,19 +409,19 @@ log.warn("Match #{airfield_icao} DIST=#{dist(lat1: lat, lng1: lng, lat2: airfiel
   end
 
   def change_flying_state(new_flying_state)
-    log.debug "changed flying state from #{@flying_state} to #{new_flying_state}"
+    log.debug "#{self} changed flying state from #{@flying_state} to #{new_flying_state}"
 
     @flying_state = new_flying_state
 
     @pg.exec_params("UPDATE acao_timetable_entries SET flying_state=$1 WHERE id=$2", [ @flying_state, @timetable_entry_id ])
   end
 
-  def change_towing_state(new_towing_state)
-    log.debug "changed towing state from #{@towing_state} to #{new_towing_state}"
+  def change_tow_state(new_tow_state)
+    log.debug "#{self} changed towing state from #{@tow_state} to #{new_tow_state}"
 
-    @towing_state = new_towing_state
+    @tow_state = new_tow_state
 
-    @pg.exec_params("UPDATE acao_timetable_entries SET towing_state=$1 WHERE id=$2", [ @towing_state, @timetable_entry_id ])
+    @pg.exec_params("UPDATE acao_timetable_entries SET tow_state=$1 WHERE id=$2", [ @tow_state, @timetable_entry_id ])
   end
 
   def event(event_name, text, data = {})
