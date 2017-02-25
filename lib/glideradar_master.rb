@@ -34,6 +34,7 @@ class App < Ygg::Agent::Base
 
   def agent_boot
     @pg = PG::Connection.open(mycfg.db.to_h)
+    @pg.type_map_for_results = PG::BasicTypeMapForResults.new(@pg)
 
     @recorder = actor_supervise_new(Recorder, config: {
       actor_name: :recorder,
@@ -47,7 +48,7 @@ class App < Ygg::Agent::Base
 
     @amqp.ask(AM::AMQP::MsgExchangeDeclare.new(
       channel_id: @amqp_chan,
-      name: mycfg.exchange,
+      name: mycfg.source_exchange,
       type: :topic,
       durable: true,
       auto_delete: false,
@@ -66,7 +67,7 @@ class App < Ygg::Agent::Base
     @amqp.ask(AM::AMQP::MsgQueueBind.new(
       channel_id: @amqp_chan,
       queue_name: mycfg.queue,
-      exchange_name: mycfg.exchange,
+      exchange_name: mycfg.source_exchange,
       routing_key: '#'
     )).value
 
@@ -83,6 +84,18 @@ class App < Ygg::Agent::Base
       durable: true,
       auto_delete: false,
     )).value
+
+    @airfields = {}
+
+    res = @pg.exec_params("SELECT acao_airfields.*, core_locations.lat, core_locations.lng, core_locations.alt "+
+                           "FROM acao_airfields JOIN core_locations ON acao_airfields.location_id=core_locations.id")
+    res.each do |airfield|
+
+log.warn "AIRFIELD = #{airfield}"
+
+      airfield.symbolize_keys!
+      @airfields[airfield[:id]] = airfield
+    end
 
     @pending_recs = {}
     @pending_acks = {}
@@ -105,10 +118,12 @@ class App < Ygg::Agent::Base
 
     @clock_internal = actor_set_timer(delay: 1.second, interval: 1.second, start: false) do
       if !@clock_source
-        @time = Time.now
+        @now = Time.now
         clock_event
       end
     end
+
+    @dump_file = File.open('/var/lib/yggdra/messages_dump', 'ab')
   end
 
   def actor_handle(message)
@@ -116,6 +131,10 @@ class App < Ygg::Agent::Base
     when AM::AMQP::MsgDelivery
 
       if message.consumer_tag == @msg_consumer
+        if @dump_file
+          @dump_file.write({ header: message.headers, payload: message.payload }.to_json + "\n")
+        end
+
         case message.headers[:type]
         when 'STATION_UPDATE'
           payload = JSON.parse(message.payload).deep_symbolize_keys!
@@ -144,40 +163,6 @@ class App < Ygg::Agent::Base
     end
   end
 
-  def periodic_cleanup
-    traffics_to_remove = []
-
-    @traffics_by_aircraft_id.each do |aircraft_id, tra|
-      begin
-        tra.update_time(@time)
-      rescue Traffic::DataError
-      end
-
-      if @time - tra.last_update > 120.seconds
-        tra.remove!
-        traffics_to_remove << aircraft_id
-      end
-    end
-
-    traffics_to_remove.each do |aircraft_id|
-      @traffics_by_flarm_id.delete @traffics_by_aircraft_id[aircraft_id].flarm_id
-      @traffics_by_aircraft_id.delete aircraft_id
-      @towplanes.delete aircraft_id
-    end
-
-    @stations.each do |sta_id, sta|
-      begin
-        sta.update_time(@time)
-      rescue Station::DataError
-      end
-    end
-
-    if !@today || @today != @time.to_date
-      @today = @time.to_date
-      @aircrafts_seen_today = {}
-    end
-  end
-
   def rcv_station_update(message)
     if !message[:time] || !message[:station_id]
       log.warn "Spurious data received"
@@ -189,7 +174,7 @@ class App < Ygg::Agent::Base
     if !@clock_source
       @clock_internal.stop!
       @clock_source = message[:station_id]
-      @time = msg_time
+      @now = msg_time
       event(:CLOCK_SYNC, "Clock synced to #{@clock_source}", clock_source: @clock_source)
     end
 
@@ -197,7 +182,7 @@ class App < Ygg::Agent::Base
 
     sta = @stations[sta_id]
     if !sta
-      sta = Station.new(now: @time, name: sta_id, data: message, log: log,
+      sta = Station.new(now: @now, name: sta_id, data: message, log: log,
         event_cb: lambda { |sta, event, text, now, args|
           event(event, "Station #{sta} #{text}", sta_id: sta_id, sta: sta.processed_representation, **args)
         }
@@ -209,7 +194,7 @@ class App < Ygg::Agent::Base
     sta.update(data: message)
 
     if @clock_source == message[:station_id]
-      @time = msg_time
+      @now = msg_time
       clock_event
     end
   end
@@ -221,7 +206,7 @@ class App < Ygg::Agent::Base
       return
     end
 
-    if !@time
+    if !@now
       log.info "Not synced yet, ignoring traffic update"
       @amqp.tell AM::AMQP::MsgAck.new(channel_id: @amqp_chan, delivery_tag: delivery_tag)
       return
@@ -239,38 +224,21 @@ class App < Ygg::Agent::Base
 
     tra = @traffics_by_flarm_id[flarm_id]
     if !tra
-      res = @pg.exec_params("SELECT acao_aircrafts.* FROM acao_aircrafts JOIN acao_trackers ON acao_aircrafts.id=acao_trackers.aircraft_id WHERE acao_trackers.type='FLARM' and acao_trackers.identifier=$1", [ flarm_id ])
-
-      aircraft_data = {}
-
-      if res.ntuples > 0
-        aircraft_id = res[0]['id'].to_i
-
-        aircraft_data = {
-          owner_name: res[0]['owner_name'],
-          home_airport: res[0]['home_airport'],
-          type_id: nil,#res[0][''],
-          type_name: res[0]['type_name'],
-          race_registration: res[0]['race_registration'],
-          registration: res[0]['registration'],
-          common_radio_frequency: res[0]['common_radio_frequency'],
-        }
-      else
-        res = @pg.exec_params("INSERT INTO acao_aircrafts DEFAULT VALUES RETURNING id", [ ])
-
-        aircraft_id = res[0]['id'].to_i
-
-        res = @pg.exec_params("INSERT INTO acao_trackers (aircraft_id, type, identifier) VALUES ($1, 'FLARM', $2) RETURNING id", [ aircraft_id, flarm_id ])
-
+      if !(match = /^(flarm|icao):(.*)$/.match(flarm_id))
+        return
       end
 
+      flarm_identifier_type = match[1]
+      flarm_identifier = match[2]
+
       tra = Traffic.new(
-        now: @time,
-        aircraft_id: aircraft_id,
-        flarm_id: flarm_id,
-        aircraft_data: aircraft_data,
+        now: @now,
+        flarm_identifier_type: flarm_identifier_type,
+        flarm_identifier: flarm_identifier,
+        airfields: @airfields.deep_dup,
         data: data,
         source: station_id,
+        pg: @pg,
         log: log,
         event_cb: lambda { |tra, event, text, now, args|
           event(event, "Traffic #{tra} #{text}", traffic: tra.traffic_update, **args)
@@ -288,34 +256,34 @@ class App < Ygg::Agent::Base
     end
 
     @stats_recorder.tell(StatsRecorder::MsgRecord.new(flarm_id: flarm_id, aircraft_id: tra.aircraft_id, data: data,
-       station_id: station_id, time: @time))
+       station_id: station_id, time: @now))
 
     @updated_traffics[tra.aircraft_id] = tra
 
-    if !@aircrafts_seen_today[tra.aircraft_id]
-      res = @pg.exec_params("SELECT * FROM trk_day_aircrafts WHERE day=$1 AND aircraft_id=$2", [ @time, tra.aircraft_id ])
-      if res.ntuples == 0
-        @pg.exec_params("INSERT INTO trk_day_aircrafts (day, aircraft_id) VALUES ($1,$2) RETURNING id",
-          [ @time, tra.aircraft_id ])
-      end
-
-      @aircrafts_seen_today[aircraft_id] = true
-    end
+#    if !@aircrafts_seen_today[tra.aircraft_id]
+#      res = @pg.exec_params("SELECT * FROM trk_day_aircrafts WHERE day=$1 AND aircraft_id=$2", [ @now, tra.aircraft_id ])
+#      if res.ntuples == 0
+#        @pg.exec_params("INSERT INTO trk_day_aircrafts (day, aircraft_id) VALUES ($1,$2) RETURNING id",
+#          [ @now, tra.aircraft_id ])
+#      end
+#
+#      @aircrafts_seen_today[aircraft_id] = true
+#    end
 
   rescue Traffic::DataError
   end
 
   def event(type, text, aircraft_id: nil, **data)
-    log.info("#{@time}: #{text}")
+    log.info("#{@now}: #{text}")
 
-    @pg.exec_params('INSERT INTO trk_events (at, event, aircraft_id, data, text, recorded_at) VALUES ($1,$2,$3,$4,$5,now())',
-                    [ @time, type, aircraft_id, text, data ])
+    @pg.exec_params('INSERT INTO acao_radar_events (at, event, aircraft_id, data, text, recorded_at) VALUES ($1,$2,$3,$4,$5,now())',
+                    [ @now, type, aircraft_id, text, data ])
 
-    if @time && Time.now - @time < 30.seconds
+    if @now && Time.now - @now < 30.seconds
       @amqp.tell AM::AMQP::MsgPublish.new(
         channel_id: @amqp_chan,
         exchange: mycfg.processed_traffic_exchange,
-        payload: data.merge({ aircraft_id: aircraft_id, timestamp: @time, text: text }).to_json,
+        payload: data.merge({ aircraft_id: aircraft_id, timestamp: @now, text: text }).to_json,
         routing_key: type.to_s,
         persistent: false,
         mandatory: false,
@@ -334,7 +302,7 @@ class App < Ygg::Agent::Base
     stations_dump = {}
 
     @updated_traffics.each do |aircraft_id,tra|
-      tra.updates_complete
+      tra.clock_event(@now)
 
       @towplanes.each do |towplane_id, towplane|
         towplane.check_towed(tra) if towplane != tra
@@ -345,12 +313,20 @@ class App < Ygg::Agent::Base
       end
     end
 
-    if Time.now - @time < 30.seconds
+    @stations.each do |sta_id, sta|
+      begin
+        sta.clock_event(@now)
+      rescue Station::DataError
+      end
+    end
+
+    # Publish the traffic update if not too old
+    if Time.now - @now < 30.seconds
       @amqp.tell AM::AMQP::MsgPublish.new(
         channel_id: @amqp_chan,
         exchange: mycfg.processed_traffic_exchange,
         payload: {
-          traffics: Hash[@updated_traffics.map { |aircraft_id, tra| [ tra.flarm_id, tra.traffic_update ] }],
+          traffics: Hash[@updated_traffics.map { |aircraft_id, tra| [ tra.flarm_combined_identifier, tra.traffic_update ] }],
           stations: Hash[@stations.map { |sta_id, sta| [ sta_id, sta.processed_representation ] }],
         }.to_json,
         routing_key: 'TRAFFICS_UPDATE',
@@ -363,7 +339,8 @@ class App < Ygg::Agent::Base
       )
     end
 
-    recmsg = Recorder::MsgRecord.new(time: @time, traffics: updates)
+    # Record the track
+    recmsg = Recorder::MsgRecord.new(time: @now, traffics: updates)
 
     @recorder.tell(recmsg)
     @pending_recs[recmsg.object_id] = @pending_acks.keys
@@ -371,7 +348,34 @@ class App < Ygg::Agent::Base
     @pending_acks.clear
     @updated_traffics.clear
 
+
+    if !@today || @today != @now.to_date
+      @today = @now.to_date
+      day_changed!
+    end
+
     periodic_cleanup
+  end
+
+  def periodic_cleanup
+    traffics_to_remove = []
+
+    @traffics_by_aircraft_id.each do |aircraft_id, tra|
+      if @now - tra.timestamp > 120.seconds
+        tra.remove!
+        traffics_to_remove << aircraft_id
+      end
+    end
+
+    traffics_to_remove.each do |aircraft_id|
+      @traffics_by_flarm_id.delete @traffics_by_aircraft_id[aircraft_id].flarm_combined_identifier
+      @traffics_by_aircraft_id.delete aircraft_id
+      @towplanes.delete aircraft_id
+    end
+  end
+
+  def day_changed!
+    @aircrafts_seen_today = {}
   end
 
 end

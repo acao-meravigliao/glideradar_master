@@ -30,7 +30,7 @@ class StatsRecorder
   def actor_boot
     @pg = PG::Connection.open(@db_config)
     @ins_statement = @pg.prepare('ins',
-      'INSERT INTO trk_track_stats (at, rcv_at, rec_at, src, aircraft_id, lat, lng, alt, cog, sog, tr, cr) ' +
+      'INSERT INTO acao_radar_raw_points (at, rcv_at, rec_at, src, aircraft_id, lat, lng, alt, cog, sog, tr, cr) ' +
       'VALUES ($1,$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11)')
   end
 

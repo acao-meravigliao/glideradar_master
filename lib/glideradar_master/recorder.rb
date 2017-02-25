@@ -27,7 +27,7 @@ class Recorder
   def actor_boot
     @pg = PG::Connection.open(@db_config)
     @ins_statement = @pg.prepare('ins',
-      'INSERT INTO trk_track_entries (at, aircraft_id, lat, lng, alt, cog, sog, tr, cr, recorded_at, src, srcs) ' +
+      'INSERT INTO acao_radar_points (at, aircraft_id, lat, lng, alt, cog, sog, tr, cr, recorded_at, src, srcs) ' +
       'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10, $11)')
   end
 
@@ -37,8 +37,8 @@ class Recorder
       @pg.transaction do
         message.traffics.each do |tra|
           @pg.exec_prepared('ins',
-             [ tra.last_update, tra.aircraft_id, tra.lat, tra.lng, tra.alt, tra.cog, tra.sog, tra.tr,
-               tra.cr, tra.src, tra.srcs.keys.join(',') ])
+             [ tra.timestamp, tra.aircraft_id, tra.lat, tra.lng, tra.alt, tra.cog, tra.sog, tra.tr,
+               tra.cr, tra.src, tra.srcs.join(',') ])
         end
       end
 

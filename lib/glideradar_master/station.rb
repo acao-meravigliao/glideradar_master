@@ -99,7 +99,7 @@ class Station
    }
   end
 
-  def update_time(now)
+  def clock_event(now)
     if @now && now < @now
       log.warn "Station #{self}: Non-monotonic timestamp in update_time (#{now} < #{@now})"
       raise DataError
