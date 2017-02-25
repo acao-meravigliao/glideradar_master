@@ -99,10 +99,12 @@ class Traffic
 
   def check_timetable_entry
     res = @pg.exec_params(
-            "SELECT * FROM acao_timetable_entries WHERE aircraft_id=$1 " +
+            "SELECT id FROM acao_timetable_entries WHERE aircraft_id=$1 " +
               "AND (takeoff_at IS NULL OR takeoff_at < $2) " +
               "AND (landing_at IS NULL OR landing_at > $2)", [ @aircraft_id, @now ])
-    if res.ntuples == 0
+    if res.ntuples > 0
+      @timetable_entry_id = res[0]['id']
+    else
       res = @pg.exec_params("INSERT INTO acao_timetable_entries (aircraft_id) VALUES ($1) RETURNING id", [ @aircraft_id ])
       @timetable_entry_id = res[0]['id']
     end
