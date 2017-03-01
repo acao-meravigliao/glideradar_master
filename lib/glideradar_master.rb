@@ -288,6 +288,8 @@ log.warn "AIRFIELD = #{airfield}"
   end
 
   def clock_event
+log.info "Clock Event, now=#{@now}"
+
     @clock_timeout.reset!
 
     updates = []

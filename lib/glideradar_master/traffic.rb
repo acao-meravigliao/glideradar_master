@@ -132,7 +132,7 @@ class Traffic
 
   def update(data:)
 
-log.debug "src=%6s now=%30s ts=%25s rcv_ts=%25s now-ts=%-5.1f" % [ data[:src], @now, data[:ts], data[:rcv_ts], @now - data[:ts] ]
+log.debug "%15s src=%6s now=%12s ts=%12s rcv_ts=%12s delay=%-5.3f now-ts=%-3d" % [ self.to_s, data[:src], @now.strftime('%H:%M:%S.%L'), data[:ts].strftime('%H:%M:%S.%L'), data[:rcv_ts].strftime('%H:%M:%S.%L'), (data[:rcv_ts] - data[:ts]), @now - data[:ts] ]
 
     if data[:ts] > @now + 5.seconds
       log.error "Received updates from the future?? ts=#{data[:ts]} now=#{@now} diff=#{@now - data[:ts]}"
