@@ -1,0 +1,97 @@
+#!/usr/bin/env ruby
+#
+# Copyright (C) 2014-2015, Daniele Orlandi
+#
+# Author:: Daniele Orlandi <daniele@orlandi.com>
+#
+# License:: You can redistribute it and/or modify it under the terms of the LICENSE file.
+#
+
+require 'ygg/app/base'
+require 'am/amqp'
+
+require 'glideradar_master/version'
+
+module GlideradarMaster
+
+class Replay < Ygg::App::Base
+  self.app_name = 'glideradar_replay'
+  self.app_version = GlideradarMaster::VERSION
+
+  def app_prepare_default_config
+    app_config_files << File.join(File.dirname(__FILE__), '..', 'config', 'glideradar_master.conf')
+    app_config_files << '/etc/yggdra/agents.conf'
+    app_config_files << '/etc/yggdra/glideradar_master.conf'
+  end
+
+  def prepare_options(o)
+    super
+
+    o.on('--msg-dump-file DIR', 'Dump file') { |v| config.msg_dump_file = v }
+    o.on('--speedup VAL', 'Speed parameter') { |v| config.speedup = v.to_f }
+    o.on('--infinite-speed', 'Enable infinite speed') { |v| config.infinite_speed = true }
+    o.on("--amqp-debug [LEVEL]", [ '0', '1', '2' ], "Output AMQP messages") { |v| config['amqp.debug'] = v ? v.to_i : 1 }
+  end
+
+  def app_boot
+    @speedup = config.speedup || 1
+
+    @amqp = actor_supervise_new(AM::AMQP, config: {
+      actor_name: :amqp,
+      url: config.amqp.url,
+      debug: config.amqp.debug || 0,
+      client_heartbeat: 30,
+      keep_connected: true,
+      monitored_by: self,
+    })
+
+    @amqp.ask(AM::AMQP::MsgConnect.new).value
+    @amqp_chan = @amqp.ask(AM::AMQP::MsgChannelOpen.new).value.channel_id
+
+    @amqp.ask(AM::AMQP::MsgExchangeDeclare.new(
+      channel_id: @amqp_chan,
+      name: config.glideradar_master.source_exchange,
+      type: :topic,
+      durable: true,
+      auto_delete: false,
+    )).value
+
+    @dump_file = File.open(config.msg_dump_file, 'rb')
+
+    @lines = @dump_file.each_line
+
+    process_line
+  end
+
+  def process_line
+    loop do
+      line = @lines.next
+      msg = JSON.parse(line)
+      msg.deep_symbolize_keys!
+
+      headers = msg[:headers] || msg[:header]
+      ts = Time.parse(headers[:timestamp])
+      headers[:timestamp] = ts.to_i
+
+      @last_ts ||= ts
+
+      @amqp.ask(AM::AMQP::MsgPublish.new(
+        channel_id: @amqp_chan,
+        exchange: config.glideradar_master.source_exchange,
+        payload: msg[:payload],
+        headers: headers,
+      ))
+
+      delta_t = ts - @last_ts
+      @last_ts = ts
+
+      if !@infinite_speed && delta_t > 0
+        delay(delta_t / @speedup) { process_line }
+        break
+      end
+    end
+  end
+end
+end
+
+GlideradarMaster::Replay.run_as_main!

@@ -35,7 +35,8 @@ class App < Ygg::Agent::Base
   def prepare_options(o)
     super
 
-    o.on('--msg-dump-dir DIR', 'Create a daily dump of raw received messages') { |v| config.msg_dump_dir = v }
+    o.on('--msg-dump-dir DIR', 'Create a daily dump of raw received messages') { |v| config['glideradar_master.msg_dump_dir'] = v }
+    o.on('--enable-old-broadcast', 'Enable broadcasting on processed traffic exchange of old updates') { |v| config['glideradar_master.enable_old_broadcast'] = true }
   end
 
   def agent_boot
@@ -118,17 +119,9 @@ log.warn "AIRFIELD = #{airfield}"
     @clock_timeout = delay(5.seconds) do
       event(:LOST_CLOCK, "Lost clock #{@clock_source}", clock_source: @clock_source)
       @clock_source = nil
-      @clock_internal.start!
     end
 
-    @clock_internal = actor_set_timer(delay: 1.second, interval: 1.second, start: false) do
-      if !@clock_source
-        @now = Time.now
-        clock_event
-      end
-    end
-
-    open_dump_file if config.msg_dump_dir
+    open_dump_file if config.glideradar_master.msg_dump_dir
   end
 
   def actor_handle(message)
@@ -137,7 +130,7 @@ log.warn "AIRFIELD = #{airfield}"
 
       if message.consumer_tag == @msg_consumer
         if @dump_file
-          @dump_file.write({ header: message.headers, payload: message.payload }.to_json + "\n")
+          @dump_file.write({ headers: message.headers, payload: message.payload }.to_json + "\n")
         end
 
         case message.headers[:type]
@@ -177,7 +170,6 @@ log.warn "AIRFIELD = #{airfield}"
     msg_time = Time.parse(message[:time])
 
     if !@clock_source
-      @clock_internal.stop!
       @clock_source = message[:station_id]
       @now = msg_time
       event(:CLOCK_SYNC, "Clock synced to #{@clock_source}", clock_source: @clock_source)
@@ -269,6 +261,8 @@ log.warn "AIRFIELD = #{airfield}"
   def event(type, text, aircraft_id: nil, **data)
     log.info("#{@now}: #{text}")
 
+    return if !@now
+
     @pg.exec_params('INSERT INTO acao_radar_events (at, event, aircraft_id, data, text, recorded_at) VALUES ($1,$2,$3,$4,$5,now())',
                     [ @now, type, aircraft_id, text, data ])
 
@@ -316,7 +310,7 @@ log.warn "AIRFIELD = #{airfield}"
     end
 
     # Publish the traffic update if not too old
-    if Time.now - @now < 30.seconds
+    if config.glideradar_master.enable_old_broadcast || Time.now - @now < 30.seconds
       @amqp.tell AM::AMQP::MsgPublish.new(
         channel_id: @amqp_chan,
         exchange: mycfg.processed_traffic_exchange,
@@ -345,6 +339,7 @@ log.warn "AIRFIELD = #{airfield}"
 
     @today ||= @now.to_date
     if @today != @now.to_date
+      @today = @now.to_date
       day_changed!
     end
 
@@ -373,12 +368,12 @@ log.warn "AIRFIELD = #{airfield}"
 
     # Cleanup timetable, removing flights with no takeoff/landing
 
-    open_dump_file if config.msg_dump_dir
+    open_dump_file if config.glideradar_master.msg_dump_dir
   end
 
   def open_dump_file
     @dump_file.close if @dump_file
-    @dump_file = File.open(File.join(config.msg_dump_dir, Time.now.strftime('dump-%Y%m%d')), 'ab')
+    @dump_file = File.open(File.join(config.glideradar_master.msg_dump_dir, Time.now.strftime('dump-%Y%m%d')), 'ab')
   end
 
 end
