@@ -217,6 +217,12 @@ log.warn "AIRFIELD = #{airfield}"
   end
 
   def rcv_traffic_update_traffic(flarm_id, data, station_id, delivery_tag)
+
+    data = data.dup
+    data[:src] = station_id
+    data[:ts] = Time.parse(data[:ts])
+    data[:rcv_ts] = Time.new
+
     tra = @traffics_by_flarm_id[flarm_id]
     if !tra
       if !(match = /^(flarm|icao):(.*)$/.match(flarm_id))
@@ -232,7 +238,6 @@ log.warn "AIRFIELD = #{airfield}"
         flarm_identifier: flarm_identifier,
         airfields: @airfields.deep_dup,
         data: data,
-        source: station_id,
         pg: @pg,
         log: log,
         event_cb: lambda { |tra, event, text, now, args|
@@ -247,7 +252,7 @@ log.warn "AIRFIELD = #{airfield}"
       @traffics_by_aircraft_id[tra.aircraft_id] = tra
       @traffics_by_flarm_id[flarm_id] = tra
     else
-      tra.update(data: data, source: station_id)
+      tra.update(data: data)
     end
 
     @stats_recorder.tell(StatsRecorder::MsgRecord.new(flarm_id: flarm_id, aircraft_id: tra.aircraft_id, data: data,

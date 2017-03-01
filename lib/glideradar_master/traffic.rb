@@ -68,7 +68,7 @@ class Traffic
 
   TOWPLANE_TYPE = 0x2
 
-  def initialize(now:, flarm_identifier_type:, flarm_identifier:, airfields:, data:, source:, pg:, log:, event_cb:)
+  def initialize(now:, flarm_identifier_type:, flarm_identifier:, airfields:, data:, pg:, log:, event_cb:)
     @now = now
     @timestamp = now
 
@@ -114,7 +114,7 @@ class Traffic
       aircraft_info: aircraft_info,
     )
 
-    update(data: data, source: source)
+    update(data: data)
   end
 
   def check_timetable_entry
@@ -130,12 +130,12 @@ class Traffic
     end
   end
 
-  def update(data:, source:)
-    data[:ts] = Time.parse(data[:ts])
-    data[:rcv_ts] = Time.new
+  def update(data:)
+
+log.debug "src=%6s now=%30s ts=%25s rcv_ts=%25s now-ts=%-5.1f" % [ data[:src], @now, data[:ts], data[:rcv_ts], @now - data[:ts] ]
 
     if data[:ts] > @now + 5.seconds
-      log.error "Received updates from the future??"
+      log.error "Received updates from the future?? ts=#{data[:ts]} now=#{@now} diff=#{@now - data[:ts]}"
       return
     end
 
