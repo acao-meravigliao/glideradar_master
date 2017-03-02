@@ -274,7 +274,7 @@ log.warn "AIRFIELD = #{airfield}"
     @pg.exec_params('INSERT INTO acao_radar_events (at, event, aircraft_id, data, text, recorded_at) VALUES ($1,$2,$3,$4,$5,now())',
                     [ @now, type, aircraft_id, text, data ])
 
-    if @now && Time.now - @now < 30.seconds
+    if may_i_broadcast?
       @amqp.tell AM::AMQP::MsgPublish.new(
         channel_id: @amqp_chan,
         exchange: mycfg.processed_traffic_exchange,
@@ -322,7 +322,7 @@ log.warn "AIRFIELD = #{airfield}"
     end
 
     # Publish the traffic update if not too old
-    if config.glideradar_master.enable_old_broadcast || Time.now - @now < 30.seconds
+    if may_i_broadcast?
       @amqp.tell AM::AMQP::MsgPublish.new(
         channel_id: @amqp_chan,
         exchange: mycfg.processed_traffic_exchange,
@@ -356,6 +356,10 @@ log.warn "AIRFIELD = #{airfield}"
     end
 
     periodic_cleanup
+  end
+
+  def may_i_broadcast?
+    config.glideradar_master.enable_old_broadcast || Time.now - @now < 30.seconds
   end
 
   def periodic_cleanup

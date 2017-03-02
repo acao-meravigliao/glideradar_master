@@ -113,7 +113,9 @@ class Traffic
       end
     end
 
-    event(:TRAFFIC_NEW, "New traffic, type (#{@type})=#{FLARM_TYPES[@type]}",
+    check_timetable_entry
+
+    event(:TRAFFIC_NEW, "New traffic, type (#{@type})=#{FLARM_TYPES[@type]}, timetable_entry_id=#{@timetable_entry_id}",
       aircraft_info: aircraft_info,
     )
 
@@ -126,9 +128,11 @@ class Traffic
               "AND (takeoff_at IS NULL OR takeoff_at < $2) " +
               "AND (landing_at IS NULL OR landing_at > $2)", [ @aircraft_id, @now ])
     if res.ntuples > 0
+      log.info "#{self}: Existing timetable entry #{res[0]['id']}"
       @timetable_entry_id = res[0]['id']
     else
       res = @pg.exec_params("INSERT INTO acao_timetable_entries (aircraft_id) VALUES ($1) RETURNING id", [ @aircraft_id ])
+      log.info "#{self}: Created timetable entry #{res[0]['id']} (old=#{@timetable_entry_id})"
       @timetable_entry_id = res[0]['id']
     end
   end
@@ -220,6 +224,9 @@ class Traffic
 
     when :on_land
       if @sog > 15
+        # If we have landed earlier ensure a new entry is created
+        check_timetable_entry
+
         @maybe_taking_off_since = @timestamp
         @maybe_taking_off_lat = @lat
         @maybe_taking_off_lng = @lng
@@ -295,9 +302,6 @@ class Traffic
             end
 
             @pg.transaction do
-              check_timetable_entry
-              @tow_plane.check_timetable_entry
-
               res = @pg.exec_params("UPDATE acao_timetable_entries SET towed_by_id=$2  WHERE id=$1",
                        [ @timetable_entry_id, @tow_plane.timetable_entry_id ])
             end
@@ -315,8 +319,6 @@ class Traffic
       if other_tra == @tow_plane && pseudist > 750
 
         @pg.transaction do
-          check_timetable_entry
-
           res = @pg.exec_params("UPDATE acao_timetable_entries SET tow_duration=$2, tow_height=$3  WHERE id=$1",
                    [ @timetable_entry_id, (@timestamp - @tow_since).to_i, @alt.to_i ])
         end
