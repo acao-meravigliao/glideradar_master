@@ -14,6 +14,7 @@ class Traffic
 
   attr_accessor :type
   attr_accessor :aircraft_id
+  attr_accessor :timetable_entry_id
   attr_accessor :flarm_identifier_type
   attr_accessor :flarm_identifier
   attr_accessor :aircraft_type_id
@@ -68,7 +69,7 @@ class Traffic
 
   TOWPLANE_TYPE = 0x2
 
-  def initialize(now:, flarm_identifier_type:, flarm_identifier:, airfields:, data:, pg:, log:, event_cb:)
+  def initialize(now:, flarm_identifier_type:, flarm_identifier:, airfields:, data:, pg:, debug_timing: false, log:, event_cb:)
     @now = now
     @timestamp = now
 
@@ -76,6 +77,8 @@ class Traffic
     @flarm_identifier_type = flarm_identifier_type
     @flarm_identifier = flarm_identifier
     @airfields = airfields
+
+    @debug_timing = debug_timing
 
     @pg = pg
 
@@ -132,7 +135,11 @@ class Traffic
 
   def update(data:)
 
-log.debug "%15s src=%6s now=%12s ts=%12s rcv_ts=%12s delay=%-5.3f now-ts=%-3d" % [ self.to_s, data[:src], @now.strftime('%H:%M:%S.%L'), data[:ts].strftime('%H:%M:%S.%L'), data[:rcv_ts].strftime('%H:%M:%S.%L'), (data[:rcv_ts] - data[:ts]), @now - data[:ts] ]
+    if @debug_timing
+      log.debug "%15s src=%6s now=%12s ts=%12s rcv_ts=%12s delay=%-5.3f now-ts=%-3d" %
+                [ self.to_s, data[:src], @now.strftime('%H:%M:%S.%L'), data[:ts].strftime('%H:%M:%S.%L'), data[:rcv_ts].strftime('%H:%M:%S.%L'),
+                  (data[:rcv_ts] - data[:ts]), @now - data[:ts] ]
+    end
 
     if data[:ts] > @now + 5.seconds
       log.error "Received updates from the future?? ts=#{data[:ts]} now=#{@now} diff=#{@now - data[:ts]}"
@@ -227,7 +234,7 @@ log.debug "%15s src=%6s now=%12s ts=%12s rcv_ts=%12s delay=%-5.3f now-ts=%-3d" %
 
           airfield = lookup_airfield(lat: @maybe_taking_off_lat, lng: @maybe_taking_off_lng, alt: @maybe_taking_off_alt)
 
-          takeoff!(timestamp: @timestamp, lat: @maybe_taking_off_lat, lng: @maybe_taking_off_lng, alt: @maybe_taking_off_alt, airfield: airfield)
+          takeoff!(timestamp: @maybe_taking_off_since, lat: @maybe_taking_off_lat, lng: @maybe_taking_off_lng, alt: @maybe_taking_off_alt, airfield: airfield)
         end
       else
         change_flying_state(:on_land)
@@ -292,7 +299,7 @@ log.debug "%15s src=%6s now=%12s ts=%12s rcv_ts=%12s delay=%-5.3f now-ts=%-3d" %
               @tow_plane.check_timetable_entry
 
               res = @pg.exec_params("UPDATE acao_timetable_entries SET towed_by_id=$2  WHERE id=$1",
-                       [ @timetable_entry_id, @tow_plane.aircraft_id ])
+                       [ @timetable_entry_id, @tow_plane.timetable_entry_id ])
             end
 
             change_tow_state(:towing)
@@ -311,7 +318,7 @@ log.debug "%15s src=%6s now=%12s ts=%12s rcv_ts=%12s delay=%-5.3f now-ts=%-3d" %
           check_timetable_entry
 
           res = @pg.exec_params("UPDATE acao_timetable_entries SET tow_duration=$2, tow_height=$3  WHERE id=$1",
-                   [ @timetable_entry_id, @timestamp - @tow_since, @alt ])
+                   [ @timetable_entry_id, (@timestamp - @tow_since).to_i, @alt.to_i ])
         end
 
         change_tow_state(:tow_released)

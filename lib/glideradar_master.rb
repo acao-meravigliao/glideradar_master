@@ -37,6 +37,7 @@ class App < Ygg::Agent::Base
 
     o.on('--msg-dump-dir DIR', 'Create a daily dump of raw received messages') { |v| config['glideradar_master.msg_dump_dir'] = v }
     o.on('--enable-old-broadcast', 'Enable broadcasting on processed traffic exchange of old updates') { |v| config['glideradar_master.enable_old_broadcast'] = true }
+    o.on('--debug-timing', 'Enable timing debugging') { |v| config['glideradar_master.debug_timing'] = true }
   end
 
   def agent_boot
@@ -239,6 +240,7 @@ log.warn "AIRFIELD = #{airfield}"
         airfields: @airfields.deep_dup,
         data: data,
         pg: @pg,
+        debug_timing: mycfg.debug_timing,
         log: log,
         event_cb: lambda { |tra, event, text, now, args|
           event(event, "Traffic #{tra} #{text}", traffic: tra.traffic_update, **args)
@@ -288,7 +290,9 @@ log.warn "AIRFIELD = #{airfield}"
   end
 
   def clock_event
-log.info "Clock Event, now=#{@now}"
+    if mycfg.debug_timing
+      log.info "Clock Event from #{@clock_source}, now=#{@now}"
+    end
 
     @clock_timeout.reset!
 
@@ -300,8 +304,8 @@ log.info "Clock Event, now=#{@now}"
     end
 
     @updated_traffics.each do |aircraft_id,tra|
-      @towplanes.each do |towplane_id, towplane|
-        towplane.check_towed(tra) if towplane != tra
+      @towplanes.each do |towplane_id,towplane|
+        tra.check_towed(towplane) if tra != towplane
       end
 
       if tra.valid?
@@ -354,19 +358,14 @@ log.info "Clock Event, now=#{@now}"
   end
 
   def periodic_cleanup
-    traffics_to_remove = []
-
     @traffics_by_aircraft_id.each do |aircraft_id, tra|
       if @now - tra.timestamp > 120.seconds
         tra.remove!
-        traffics_to_remove << aircraft_id
-      end
-    end
 
-    traffics_to_remove.each do |aircraft_id|
-      @traffics_by_flarm_id.delete @traffics_by_aircraft_id[aircraft_id].flarm_combined_identifier
-      @traffics_by_aircraft_id.delete aircraft_id
-      @towplanes.delete aircraft_id
+        @traffics_by_aircraft_id.delete aircraft_id
+        @traffics_by_flarm_id.delete tra.flarm_combined_identifier.to_sym
+        @towplanes.delete aircraft_id
+      end
     end
   end
 
