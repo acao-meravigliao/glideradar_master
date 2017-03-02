@@ -35,6 +35,7 @@ class App < Ygg::Agent::Base
   def prepare_options(o)
     super
 
+    o.on('--source-exchange NAME', 'Set the source exchange') { |v| config['glideradar_master.source_exchange'] = v }
     o.on('--msg-dump-dir DIR', 'Create a daily dump of raw received messages') { |v| config['glideradar_master.msg_dump_dir'] = v }
     o.on('--enable-old-broadcast', 'Enable broadcasting on processed traffic exchange of old updates') { |v| config['glideradar_master.enable_old_broadcast'] = true }
     o.on('--debug-timing', 'Enable timing debugging') { |v| config['glideradar_master.debug_timing'] = true }

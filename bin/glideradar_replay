@@ -27,14 +27,16 @@ class Replay < Ygg::App::Base
   def prepare_options(o)
     super
 
-    o.on('--msg-dump-file DIR', 'Dump file') { |v| config.msg_dump_file = v }
-    o.on('--speedup VAL', 'Speed parameter') { |v| config.speedup = v.to_f }
-    o.on('--infinite-speed', 'Enable infinite speed') { |v| config.infinite_speed = true }
+    o.on('--source-exchange NAME', 'Set the source exchange') { |v| config['glideradar_master.source_exchange'] = v }
+    o.on('--msg-dump-file DIR', 'Dump file') { |v| config['glideradar_master.msg_dump_file'] = v }
+    o.on('--speedup VAL', 'Speed parameter') { |v| config['glideradar_master.speedup'] = v.to_f }
+    o.on('--infinite-speed', 'Enable infinite speed') { |v| config['glideradar_master.infinite_speed'] = true }
     o.on("--amqp-debug [LEVEL]", [ '0', '1', '2' ], "Output AMQP messages") { |v| config['amqp.debug'] = v ? v.to_i : 1 }
   end
 
   def app_boot
-    @speedup = config.speedup || 1
+    @speedup = config.glideradar_master.speedup || 1
+    @infinite_speed = config.glideradar_master.infinite_speed || false
 
     @amqp = actor_supervise_new(AM::AMQP, config: {
       actor_name: :amqp,
@@ -56,7 +58,7 @@ class Replay < Ygg::App::Base
       auto_delete: false,
     )).value
 
-    @dump_file = File.open(config.msg_dump_file, 'rb')
+    @dump_file = File.open(config.glideradar_master.msg_dump_file, 'rb')
 
     @lines = @dump_file.each_line
 
