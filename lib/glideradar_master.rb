@@ -99,12 +99,13 @@ class App < Ygg::Agent::Base
     res = @pg.exec_params("SELECT acao_airfields.*, core_locations.lat, core_locations.lng, core_locations.alt "+
                            "FROM acao_airfields JOIN core_locations ON acao_airfields.location_id=core_locations.id")
     res.each do |airfield|
-
-log.warn "AIRFIELD = #{airfield}"
+      log.debug "AIRFIELD = #{airfield}"
 
       airfield.symbolize_keys!
       @airfields[airfield[:id]] = airfield
     end
+
+    res = @pg.exec_params("UPDATE acao_timetable_entries SET reception_state=NULL, flying_state=NULL, tow_state=NULL")
 
     @pending_recs = {}
     @pending_acks = {}
@@ -182,7 +183,7 @@ log.warn "AIRFIELD = #{airfield}"
     sta = @stations[sta_id]
     if !sta
       sta = Station.new(now: @now, name: sta_id, data: message, log: log,
-        event_cb: lambda { |sta, event, text, now, args|
+        event_cb: lambda { |sta:, event:, text:, **args|
           event(event, "Station #{sta} #{text}", sta_id: sta_id, sta: sta.processed_representation, **args)
         }
       )
@@ -243,8 +244,8 @@ log.warn "AIRFIELD = #{airfield}"
         pg: @pg,
         debug_timing: mycfg.debug_timing,
         log: log,
-        event_cb: lambda { |tra, event, text, now, args|
-          event(event, "Traffic #{tra} #{text}", traffic: tra.traffic_update, **args)
+        event_cb: lambda { |tra:, event:, text:, **args|
+          event(event, "Traffic #{tra} #{text}", aircraft_id: data[:aircraft_id], tte: tra.tte, traffic: tra.traffic_update, **args)
         }
       )
 
@@ -266,24 +267,24 @@ log.warn "AIRFIELD = #{airfield}"
   rescue Traffic::DataError
   end
 
-  def event(type, text, aircraft_id: nil, **data)
+  def event(event_name, text, **data)
     log.info("#{@now}: #{text}")
 
     return if !@now
 
     @pg.exec_params('INSERT INTO acao_radar_events (at, event, aircraft_id, data, text, recorded_at) VALUES ($1,$2,$3,$4,$5,now())',
-                    [ @now, type, aircraft_id, text, data ])
+                    [ @now, event_name, data[:aircraft_id], text, data ])
 
     if may_i_broadcast?
       @amqp.tell AM::AMQP::MsgPublish.new(
         channel_id: @amqp_chan,
         exchange: mycfg.processed_traffic_exchange,
-        payload: data.merge({ aircraft_id: aircraft_id, timestamp: @now, text: text }).to_json,
-        routing_key: type.to_s,
+        payload: data.merge({ timestamp: @now, text: text }).to_json,
+        routing_key: event_name.to_s,
         persistent: false,
         mandatory: false,
         headers: {
-          type: type.to_s,
+          type: event_name.to_s,
           content_type: 'application/json',
         }
       )

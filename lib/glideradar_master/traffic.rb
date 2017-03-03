@@ -90,9 +90,9 @@ class Traffic
     @elabuf = []
     @srcs = []
 
-    @reception_state = :unknown
-    @flying_state = :unknown
-    @tow_state = :unknown
+    @reception_state = nil
+    @flying_state = nil
+    @tow_state = nil
 
     @pg.transaction do
       res = @pg.exec_params("SELECT * FROM acao_aircrafts WHERE #{flarm_identifier_type}_identifier=$1", [ flarm_identifier ])
@@ -115,11 +115,11 @@ class Traffic
 
     check_timetable_entry
 
+    update(data: data)
+
     event(:TRAFFIC_NEW, "New traffic, type (#{@type})=#{FLARM_TYPES[@type]}, timetable_entry_id=#{@timetable_entry_id}",
       aircraft_info: aircraft_info,
     )
-
-    update(data: data)
   end
 
   def check_timetable_entry
@@ -131,9 +131,17 @@ class Traffic
       log.info "#{self}: Existing timetable entry #{res[0]['id']}"
       @timetable_entry_id = res[0]['id']
     else
-      res = @pg.exec_params("INSERT INTO acao_timetable_entries (aircraft_id) VALUES ($1) RETURNING id", [ @aircraft_id ])
+      if @timetable_entry_id
+        res = @pg.exec_params("UPDATE acao_timetable_entries SET reception_state=NULL, flying_state=NULL, tow_state=NULL WHERE id=$1", [ @timetable_entry_id ])
+        event(:FLIGHT_CLOSED, "Flight closed")
+      end
+
+      res = @pg.exec_params("INSERT INTO acao_timetable_entries (aircraft_id, reception_state, flying_state, tow_state) VALUES ($1,$2,$3,$4) RETURNING id",
+                 [ @aircraft_id, @reception_state, @flying_state, @tow_state ])
       log.info "#{self}: Created timetable entry #{res[0]['id']} (old=#{@timetable_entry_id})"
       @timetable_entry_id = res[0]['id']
+
+      event(:FLIGHT_NEW, "New flight")
     end
   end
 
@@ -153,7 +161,7 @@ class Traffic
     @elabuf << data
 
     case @reception_state
-    when :unknown
+    when nil
       change_reception_state(:alive)
     when :lost
       change_reception_state(:alive)
@@ -164,7 +172,7 @@ class Traffic
 
   def clock_event(now)
     if now < @now
-      log.warn "Traffic #{self}: Non-monotonic timestamp in update_time (#{now} < #{@now})"
+      log.warn "#{self}: Non-monotonic timestamp in update_time (#{now} < #{@now})"
       raise DataError
     end
 
@@ -195,7 +203,7 @@ class Traffic
     return if !valid?
 
     case @flying_state
-    when :unknown
+    when nil
       if on_land?
         change_flying_state(:on_land)
         on_land!
@@ -273,10 +281,10 @@ class Traffic
                         ((other_tra.lng - lng) * 1854 * 60 * Math.cos(lat / 180 * Math::PI))**2 )
 
     case @tow_state
-    when :unknown, :tow_released
-      if @flying_state == :flying && other_tra.flying_state == :flying && other_tra.type == TOWPLANE_TYPE &&  pseudist < 250
+    when nil
+      if @flying_state == :flying && other_tra.flying_state == :flying && other_tra.type == TOWPLANE_TYPE &&  pseudist < 175
 
-        if @tow_state == :unknown
+        if @tow_state == nil
           change_tow_state(:maybe)
         else
           change_tow_state(:maybe_after_towing)
@@ -306,17 +314,18 @@ class Traffic
                        [ @timetable_entry_id, @tow_plane.timetable_entry_id ])
             end
 
-            change_tow_state(:towing)
+            change_tow_state(:towed)
+
             event(:TOW_STARTED, "tow started tow_plane=#{@tow_plane}", tow_plane: @tow_plane)
           else
-            change_tow_state(:unknown)
+            change_tow_state(nil)
             @tow_plane = nil
           end
         end
       end
 
-    when :towing
-      if other_tra == @tow_plane && pseudist > 750
+    when :towed
+      if other_tra == @tow_plane && pseudist > 500
 
         @pg.transaction do
           res = @pg.exec_params("UPDATE acao_timetable_entries SET tow_duration=$2, tow_height=$3  WHERE id=$1",
@@ -324,12 +333,15 @@ class Traffic
         end
 
         change_tow_state(:tow_released)
-        event(:TOW_RELEASED, 'tow released', tow_plane: @tow_plane, duration: @timestamp - @tow_since)
+
+        event(:TOW_RELEASED, 'tow released', tow_plane: @tow_plane, height: @alt.to_i, duration: @timestamp - @tow_since)
       end
     end
   end
 
   def remove!
+    res = @pg.exec_params("UPDATE acao_timetable_entries SET reception_state=NULL, flying_state=NULL, tow_state=NULL WHERE id=$1", [ @timetable_entry_id ])
+
     event(:TRAFFIC_REMOVED, "removed")
   end
 
@@ -337,7 +349,7 @@ class Traffic
 
   def check_alive!
     case @reception_state
-    when :unknown, :lost
+    when nil, :lost
     when :alive
       if @elabuf.size == 0 && @timestamp && @now - @timestamp > 10.seconds
         change_reception_state(:lost)
@@ -347,7 +359,7 @@ class Traffic
   end
 
   def takeoff!(timestamp:, lat:, lng:, alt:, airfield:)
-    log.warn "Takeoff detected: ts=#{timestamp}, lat=#{lat}, lng=#{lng}, alt=#{alt} airfield=#{airfield}"
+    log.warn "#{self}: Takeoff detected: ts=#{timestamp}, lat=#{lat}, lng=#{lng}, alt=#{alt} airfield=#{airfield}"
 
     @pg.transaction do
       check_timetable_entry
@@ -360,15 +372,14 @@ class Traffic
     end
 
     event(:TAKEOFF, 'Takeoff')
+
     flying!
   end
 
   def landed!(timestamp:, lat:, lng:, alt:, airfield:)
-    log.warn "Landing detected: ts=#{timestamp}, lat=#{lat}, lng=#{lng}, alt=#{alt} airfield=#{airfield}"
+    log.warn "#{self} Landing detected: ts=#{timestamp}, lat=#{lat}, lng=#{lng}, alt=#{alt} airfield=#{airfield}"
 
     @pg.transaction do
-      check_timetable_entry
-
       res = @pg.exec_params("INSERT INTO core_locations (lat, lng, alt) VALUES ($1, $2, $3) RETURNING id", [ lat, lng, alt ])
       location_id = res[0]['id']
 
@@ -376,20 +387,22 @@ class Traffic
                [ timestamp, location_id, airfield ? airfield[:id] : nil, @timetable_entry_id ])
     end
 
-    event(:LAND, 'Landed')
+    event(:LANDING, 'Landed')
+
     on_land!
   end
 
   def on_land!
     case @tow_state
-    when :towing
-      log.err "Towplane landed while towing?!"
+    when :towed
+      log.warn "Towplane landed while towing?!"
+      change_tow_state(nil)
+
       event(:TOW_ANOMALY, 'Landed while towing?!')
-      change_tow_state(:unknown)
     when :maybe
-      change_tow_state(:unknown)
+      change_tow_state(nil)
     when :tow_released
-      change_tow_state(:unknown)
+      change_tow_state(nil)
     end
   end
 
@@ -433,8 +446,8 @@ class Traffic
     @pg.exec_params("UPDATE acao_timetable_entries SET tow_state=$1 WHERE id=$2", [ @tow_state, @timetable_entry_id ])
   end
 
-  def event(event_name, text, data = {})
-    @event_cb.call(self, event_name, text, now, data.merge!(aircraft_id: @aircraft_id))
+  def event(event, text, **args)
+    @event_cb.call(tra: self, event: event, text: text, **args)
   end
 
   public
@@ -468,6 +481,12 @@ class Traffic
     tr: @tr,
     cr: @cr,
    }
+  end
+
+  def tte
+    res = @pg.exec_params( "SELECT * FROM acao_timetable_entries WHERE id=$1", [ @timetable_entry_id ])
+
+    res.ntuples > 0 ? res.first.symbolize_keys : nil
   end
 
   def aircraft_info

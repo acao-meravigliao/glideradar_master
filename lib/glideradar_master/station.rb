@@ -137,7 +137,7 @@ class Station
   end
 
   def event(event_name, text, **data)
-    @event_cb.call(self, event_name, text, now, data)
+    @event_cb.call(sta: self, event: event_name, text: text, **data)
   end
 
   public
