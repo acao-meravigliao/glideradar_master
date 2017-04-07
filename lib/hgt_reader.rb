@@ -7,6 +7,7 @@
 #
 
 class HGTReader
+  class NoFile < StandardError ; end
   class InvalidFile < StandardError ; end
 
   class CacheEntry
@@ -48,7 +49,12 @@ class HGTReader
     ce = @cache[fn]
     if !ce
       ce = @cache[fn] = CacheEntry.new
-      ce.file = File.open(File.join(@dir, fn), 'rb')
+
+      begin
+        ce.file = File.open(File.join(@dir, fn), 'rb')
+      rescue Errno::ENOENT
+        raise NoFile
+      end
 
       case ce.file.size
       when 2884802

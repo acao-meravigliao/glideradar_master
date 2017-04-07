@@ -199,7 +199,13 @@ class Traffic
       @sog = src[:sog]
       @tr = src[:tr]
       @cr = src[:cr]
-      @hgt = @hgt_reader.height(@lat, @lng)
+
+      begin
+        @hgt = @hgt_reader.height(@lat, @lng)
+      rescue HGTReader::NoFile, HGTReader::InvalidFile
+        log.warn "Missing HGT file for lat=#{@lat}, lng=#{@lng}"
+        @hgt = @alt
+      end
     end
 
     return if !valid?
