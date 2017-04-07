@@ -13,6 +13,8 @@ require 'time'
 
 require 'pg'
 
+require 'hgt_reader'
+
 require 'glideradar_master/version'
 require 'glideradar_master/task'
 require 'glideradar_master/station'
@@ -106,6 +108,8 @@ class App < Ygg::Agent::Base
     end
 
     res = @pg.exec_params("UPDATE acao_timetable_entries SET reception_state=NULL, flying_state=NULL, tow_state=NULL")
+
+    @hgt_reader = HGTReader.new(dir: mycfg.elevation_data_dir)
 
     @pending_recs = {}
     @pending_acks = {}
@@ -240,6 +244,7 @@ class App < Ygg::Agent::Base
         flarm_identifier_type: flarm_identifier_type,
         flarm_identifier: flarm_identifier,
         airfields: @airfields.deep_dup,
+        hgt_reader: @hgt_reader,
         data: data,
         pg: @pg,
         debug_timing: mycfg.debug_timing,

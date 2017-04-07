@@ -69,13 +69,14 @@ class Traffic
 
   TOWPLANE_TYPE = 0x2
 
-  def initialize(now:, flarm_identifier_type:, flarm_identifier:, airfields:, data:, pg:, debug_timing: false, log:, event_cb:)
+  def initialize(now:, flarm_identifier_type:, flarm_identifier:, airfields:, hgt_reader:, data:, pg:, debug_timing: false, log:, event_cb:)
     @now = now
     @timestamp = now
 
     @type = data[:type]
     @flarm_identifier_type = flarm_identifier_type
     @flarm_identifier = flarm_identifier
+    @hgt_reader = hgt_reader
     @airfields = airfields
 
     @debug_timing = debug_timing
@@ -198,6 +199,7 @@ class Traffic
       @sog = src[:sog]
       @tr = src[:tr]
       @cr = src[:cr]
+      @hgt = @hgt_reader.height(@lat, @lng)
     end
 
     return if !valid?
@@ -316,7 +318,7 @@ class Traffic
 
             change_tow_state(:towed)
 
-            event(:TOW_STARTED, "tow started tow_plane=#{@tow_plane}", tow_plane: @tow_plane)
+            event(:TOW_STARTED, "tow started tow_plane=#{@tow_plane}", tow_plane: @tow_plane.aircraft_info)
           else
             change_tow_state(nil)
             @tow_plane = nil
@@ -326,15 +328,17 @@ class Traffic
 
     when :towed
       if other_tra == @tow_plane && pseudist > 500
-
         @pg.transaction do
-          res = @pg.exec_params("UPDATE acao_timetable_entries SET tow_duration=$2, tow_height=$3  WHERE id=$1",
-                   [ @timetable_entry_id, (@timestamp - @tow_since).to_i, @alt.to_i ])
+          res = @pg.exec_params("INSERT INTO core_locations (lat, lng, alt) VALUES ($1, $2, $3) RETURNING id", [ lat, lng, alt ])
+          location_id = res[0]['id']
+
+          res = @pg.exec_params("UPDATE acao_timetable_entries SET tow_release_at=$2, tow_release_location_id=$3, tow_duration=$4, tow_height=$5  WHERE id=$1",
+                   [ @timetable_entry_id, @timestamp, location_id, (@timestamp - @tow_since).to_i, @alt.to_i ])
         end
 
         change_tow_state(:tow_released)
 
-        event(:TOW_RELEASED, 'tow released', tow_plane: @tow_plane, height: @alt.to_i, duration: @timestamp - @tow_since)
+        event(:TOW_RELEASED, 'tow released', tow_plane: @tow_plane.aircraft_info, height: @alt.to_i, duration: @timestamp - @tow_since)
       end
     end
   end
@@ -419,7 +423,7 @@ class Traffic
   end
 
   def on_land?
-    @sog < 3 && @cr < 1.5
+    @hgt.abs < 150
   end
 
   def change_reception_state(new_reception_state)
@@ -476,6 +480,7 @@ class Traffic
     lat: @lat,
     lng: @lng,
     alt: @alt,
+    hgt: @hgt,
     cog: @cog,
     sog: @sog,
     tr: @tr,
