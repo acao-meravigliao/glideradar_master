@@ -34,7 +34,7 @@ class App < Ygg::Agent::Base
     app_config_files << '/etc/yggdra/glideradar_master.conf'
   end
 
-  def prepare_options(o)
+  def app_prepare_options(o)
     super
 
     o.on('--source-exchange NAME', 'Set the source exchange') { |v| config['glideradar_master.source_exchange'] = v }
