@@ -333,8 +333,8 @@ class App < Ygg::Agent::Base
         channel_id: @amqp_chan,
         exchange: mycfg.processed_traffic_exchange,
         payload: {
-          traffics: Hash[@updated_traffics.map { |aircraft_id, tra| [ tra.flarm_combined_identifier, tra.traffic_update ] }],
-          stations: Hash[@stations.map { |sta_id, sta| [ sta_id, sta.processed_representation ] }],
+          traffics: @updated_traffics.values.map(&:traffic_update),
+          stations: @stations.values.map(&:processed_representation),
         }.to_json,
         routing_key: 'TRAFFICS_UPDATE',
         persistent: false,

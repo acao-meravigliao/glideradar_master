@@ -14,6 +14,7 @@ class Traffic
 
   attr_accessor :type
   attr_accessor :aircraft_id
+  attr_accessor :aircraft_uuid
   attr_accessor :timetable_entry_id
   attr_accessor :flarm_identifier_type
   attr_accessor :flarm_identifier
@@ -101,6 +102,7 @@ class Traffic
       if res.ntuples > 0
         row = res.first
         @aircraft_id = row['id']
+        @aircraft_uuid = row['uuid']
         @aircraft_type_id = row['aircraft_type_id']
         @race_registration = row['race_registration']
         @registration = row['registration']
@@ -109,8 +111,8 @@ class Traffic
         @fn_type_name = row['fn_type_name']
         @fn_common_radio_frequency = row['fn_common_radio_frequency']
       else
-        res = @pg.exec_params("INSERT INTO acao_aircrafts (#{flarm_identifier_type}_identifier) VALUES ($1) RETURNING id", [ flarm_identifier ])
-        @aircraft_id = res[0]['id']
+        res = @pg.exec_params("INSERT INTO acao_aircrafts (#{flarm_identifier_type}_identifier) VALUES ($1) RETURNING uuid", [ flarm_identifier ])
+        @aircraft_uuid = res[0]['uuid']
       end
     end
 
@@ -503,7 +505,7 @@ class Traffic
   def aircraft_info
    {
     type: @type,
-    aircraft_id: @aircraft_id,
+    uuid: @aircraft_uuid,
     flarm_id: @flarm_identifier,
 
     aircraft_aircraft_type_id: @aircraft_aircraft_type_id,
