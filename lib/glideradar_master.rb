@@ -48,12 +48,12 @@ class App < Ygg::Agent::Base
     @pg.type_map_for_results = PG::BasicTypeMapForResults.new(@pg)
 
     @recorder = actor_supervise_new(Recorder, config: {
-      actor_name: :recorder,
+      actor_id: :recorder,
       db_config: mycfg.db.to_h,
     })
 
     @stats_recorder = actor_supervise_new(StatsRecorder, config: {
-      actor_name: :stats_recorder,
+      actor_id: :stats_recorder,
       db_config: mycfg.db.to_h,
     })
 
